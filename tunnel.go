@@ -21,45 +21,126 @@ type SocksCred struct {
 }
 
 // Tunnel 是一条运行中的隧道：一个 netns + 一个 openvpn 进程 + 一个本地 SOCKS5 端口。
+//
+// 运行态字段全部由 mu 保护。健康检查、HTTP 接口、拉起与重连 goroutine 会并发
+// 读写同一条隧道，早先版本只在少数字段上加锁，go test -race 能稳定复现竞争。
 type Tunnel struct {
+	Slot int `json:"slot"`
+
+	mu       sync.Mutex
+	port     int
+	node     Node
+	status   string // starting | up | failed | stopped
+	exitIP   string
+	errMsg   string
+	since    time.Time
+	cred     SocksCred
+	swapped  []string // 换节点用过的 hostname，按时间先后排
+	listener net.Listener
+	ovpn     *exec.Cmd
+}
+
+// TunnelView 是隧道对外的只读快照。JSON 字段与旧版保持一致，
+// f 脚本与界面都按这些名字取值。
+type TunnelView struct {
 	Slot   int       `json:"slot"`
 	Port   int       `json:"port"`
 	Node   Node      `json:"node"`
-	Status string    `json:"status"` // starting | up | failed | stopped
+	Status string    `json:"status"`
 	ExitIP string    `json:"exit_ip"`
 	Err    string    `json:"err,omitempty"`
 	Since  time.Time `json:"since"`
 	Cred   SocksCred `json:"cred"`
-
-	ns       string
-	listener net.Listener
-	ovpn     *exec.Cmd
-	mu       sync.Mutex
-	// swapped 是这条出口换节点时用过的 hostname，按时间先后排。
-	// 手动换节点要避开它们：只排除"当前这个"的话，连点两次就会在
-	// 两个节点之间来回跳（A 换成 B，B 再换回 A）。
-	swapped []string
-	// prevHost 是"换节点动作还没收尾"的标记：记着换之前绑的是谁。
-	//
-	// 换节点分两步——先把隧道连到新节点，再把入站从旧节点改绑过来。
-	// 两步之间崩溃或重启的话，存盘的隧道已经是新节点、而入站还指着旧节点，
-	// 两边对不上，那个入站就掉成了没人认领的孤儿。
-	// 这个字段跟着状态一起落盘，重启后照着它把入站接回来。
-	prevHost string
 }
 
-// prevHostOf 读"换节点未收尾"标记。
-func (t *Tunnel) prevHostOf() string {
+func (t *Tunnel) snapshot() TunnelView {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	return t.prevHost
+	return TunnelView{
+		Slot: t.Slot, Port: t.port, Node: t.node, Status: t.status,
+		ExitIP: t.exitIP, Err: t.errMsg, Since: t.since, Cred: t.cred,
+	}
 }
 
-// setPrevHost 记下或清掉"换节点未收尾"标记。空串表示已经收尾。
-func (t *Tunnel) setPrevHost(host string) {
+// PortNum 返回当前 SOCKS5 端口。端口在监听失败被占用时会换一个，
+// 所以读写都要过锁。
+func (t *Tunnel) PortNum() int {
 	t.mu.Lock()
-	t.prevHost = host
+	defer t.mu.Unlock()
+	return t.port
+}
+
+func (t *Tunnel) statusOf() string {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.status
+}
+
+func (t *Tunnel) nodeOf() Node {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.node
+}
+
+func (t *Tunnel) exitIPOf() string {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.exitIP
+}
+
+func (t *Tunnel) errOf() string {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.errMsg
+}
+
+func (t *Tunnel) setNode(n Node) {
+	t.mu.Lock()
+	t.node = n
 	t.mu.Unlock()
+}
+
+func (t *Tunnel) setStatus(s string) {
+	t.mu.Lock()
+	t.status = s
+	t.mu.Unlock()
+}
+
+// setState 一次性更新状态与提示，避免界面读到半新半旧的组合。
+func (t *Tunnel) setState(status, msg string) {
+	t.mu.Lock()
+	t.status = status
+	t.errMsg = msg
+	t.mu.Unlock()
+}
+
+func (t *Tunnel) setExitIP(ip string) {
+	t.mu.Lock()
+	t.exitIP = ip
+	t.mu.Unlock()
+}
+
+// markUp 把隧道置为已连通。出口 IP 由 tryNode 探测后单独写入。
+func (t *Tunnel) markUp() {
+	t.mu.Lock()
+	t.status = "up"
+	t.errMsg = ""
+	t.mu.Unlock()
+}
+
+// setError 只更新错误提示，不动状态。
+func (t *Tunnel) setError(msg string) {
+	t.mu.Lock()
+	t.errMsg = msg
+	t.mu.Unlock()
+}
+
+// serving 表示 SOCKS5 监听是否已经建立。重连时沿用同一条隧道，
+// 监听只建一次，端口才能保持不变。
+func (t *Tunnel) serving() bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.listener != nil
 }
 
 // swapHistoryMax 是换节点历史的上限。
@@ -77,8 +158,8 @@ func (t *Tunnel) swapAvoid() map[string]bool {
 	for _, h := range t.swapped {
 		out[h] = true
 	}
-	if t.Node.HostName != "" {
-		out[t.Node.HostName] = true
+	if t.node.HostName != "" {
+		out[t.node.HostName] = true
 	}
 	return out
 }
@@ -210,6 +291,10 @@ func ensureRuleInsert(table, chain string, spec ...string) {
 	runQuiet("iptables", ins...)
 }
 
+// teardownNetns 拆掉这条隧道占用的全部系统资源。
+//
+// 除了 netns、veth 与 iptables 规则，还要清掉 /etc/netns/<ns>：
+// 那里放的是给 openvpn 用的 resolv.conf，不删会随槽位数量一直堆积。
 func (t *Tunnel) teardownNetns() {
 	ns, sub := t.nsName(), t.subnet()
 	cidr := sub + ".0/30"
@@ -219,18 +304,25 @@ func (t *Tunnel) teardownNetns() {
 	runQuiet("iptables", "-w", "5", "-t", "nat", "-D", "POSTROUTING", "-s", cidr, "-j", "MASQUERADE")
 	runQuiet("iptables", "-w", "5", "-D", "FORWARD", "-s", cidr, "-j", "ACCEPT")
 	runQuiet("iptables", "-w", "5", "-D", "FORWARD", "-d", cidr, "-j", "ACCEPT")
+	_ = os.RemoveAll(filepath.Join("/etc/netns", ns))
 }
 
 // startOpenVPN 在 netns 内拉起 openvpn，并等待 tun0 拿到地址。
 func (t *Tunnel) startOpenVPN(dir string) error {
 	ns := t.nsName()
 	cfgPath := filepath.Join(dir, ns+".ovpn")
-	if err := os.WriteFile(cfgPath, []byte(t.Node.Config), 0600); err != nil {
+	if err := os.WriteFile(cfgPath, []byte(t.nodeOf().Config), 0600); err != nil {
 		return fmt.Errorf("写配置失败: %w", err)
 	}
 	authPath := filepath.Join(dir, "auth.txt")
 	if err := os.WriteFile(authPath, []byte("vpn\nvpn\n"), 0600); err != nil {
 		return fmt.Errorf("写凭据失败: %w", err)
+	}
+
+	// 先确认 openvpn 在不在：不然要等 tun0 超时（40 秒）才报错，
+	// 而且报出来的是一句和真实原因无关的"提前退出"。
+	if _, err := exec.LookPath("openvpn"); err != nil {
+		return fmt.Errorf("找不到 openvpn 可执行文件，先装 openvpn 再试")
 	}
 
 	logPath := filepath.Join(dir, ns+".log")
@@ -248,23 +340,57 @@ func (t *Tunnel) startOpenVPN(dir string) error {
 	if err := cmdStart(cmd); err != nil {
 		return fmt.Errorf("启动 openvpn 失败: %w", err)
 	}
+	t.mu.Lock()
 	t.ovpn = cmd
-	go cmd.Wait() // 回收子进程，避免僵尸
+	t.mu.Unlock()
+
+	// 进程退出通过 channel 通知。不要去读 cmd.ProcessState：那是 Wait 在
+	// 另一个 goroutine 里写的，边等边读本身就是数据竞争。
+	done := make(chan error, 1)
+	go func() { done <- cmd.Wait() }()
 
 	// openvpn 建好 tun0 前 SOCKS5 无法正常出网，这里等它就绪
 	deadline := time.Now().Add(40 * time.Second)
 	for time.Now().Before(deadline) {
+		select {
+		case <-done:
+			// 把 openvpn 自己写的最后一行日志带出来，
+			// AUTH_FAILED 这类原因才不用再去翻文件
+			if why := lastLogLine(logPath); why != "" {
+				return fmt.Errorf("openvpn 提前退出: %s", why)
+			}
+			return fmt.Errorf("openvpn 提前退出，详见 %s", logPath)
+		default:
+		}
 		if out, err := cmdOutput(exec.Command("ip", "netns", "exec", ns, "ip", "-4", "addr", "show", "tun0")); err == nil {
 			if strings.Contains(string(out), "inet ") {
 				return nil
 			}
 		}
-		if cmd.ProcessState != nil && cmd.ProcessState.Exited() {
-			return fmt.Errorf("openvpn 提前退出，详见 %s", logPath)
-		}
 		time.Sleep(time.Second)
 	}
 	return fmt.Errorf("等待 tun0 就绪超时，详见 %s", logPath)
+}
+
+// lastLogLine 取日志文件的最后一行非空内容，用来把 openvpn 的失败原因
+// 直接带进错误里（比如 AUTH_FAILED）。
+func lastLogLine(path string) string {
+	blob, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	lines := strings.Split(string(blob), "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		s := strings.TrimSpace(lines[i])
+		if s == "" {
+			continue
+		}
+		if r := []rune(s); len(r) > 160 {
+			s = string(r[:160]) + "…"
+		}
+		return s
+	}
+	return ""
 }
 
 // serve 在母机上监听 SOCKS5 端口，出站连接则在 netns 内建立。
@@ -273,10 +399,14 @@ func (t *Tunnel) startOpenVPN(dir string) error {
 func (t *Tunnel) serve() error {
 	// 端口要尽量保持不变，否则用户已经分发出去的客户端配置会失效。
 	// 进程刚重启时旧监听可能还在 TIME_WAIT，这里给几秒重试窗口。
+	t.mu.Lock()
+	want := t.port
+	t.mu.Unlock()
+
 	var ln net.Listener
 	var err error
 	for i := 0; i < 6; i++ {
-		ln, err = net.Listen("tcp", fmt.Sprintf("0.0.0.0:%d", t.Port))
+		ln, err = net.Listen("tcp", fmt.Sprintf("0.0.0.0:%d", want))
 		if err == nil {
 			break
 		}
@@ -284,19 +414,22 @@ func (t *Tunnel) serve() error {
 	}
 	if err != nil {
 		// 确实被别的进程长期占用了，才换端口
-		port, perr := freeRandomPort(map[int]bool{t.Port: true})
+		port, perr := freeRandomPort(map[int]bool{want: true})
 		if perr != nil {
-			return fmt.Errorf("监听 %d 失败且无备用端口: %w", t.Port, err)
+			return fmt.Errorf("监听 %d 失败且无备用端口: %w", want, err)
 		}
 		ln, err = net.Listen("tcp", fmt.Sprintf("0.0.0.0:%d", port))
 		if err != nil {
 			return fmt.Errorf("监听 %d 失败: %w", port, err)
 		}
-		t.Port = port
+		want = port
 	}
+	t.mu.Lock()
+	t.port = want
 	t.listener = ln
-	dial := dialerInNetns(t.nsName())
+	t.mu.Unlock()
 
+	dial := dialerInNetns(t.nsName())
 	go func() {
 		for {
 			conn, err := ln.Accept()
@@ -315,15 +448,15 @@ func (t *Tunnel) serve() error {
 func (t *Tunnel) credential() SocksCred {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	return t.Cred
+	return t.cred
 }
 
 // setCredential 换掉这条隧道的 SOCKS5 凭据。已建立的连接不受影响，
 // 新连接立即按新凭据校验。
 func (t *Tunnel) setCredential(c SocksCred) {
 	t.mu.Lock()
-	defer t.mu.Unlock()
-	t.Cred = c
+	t.cred = c
+	t.mu.Unlock()
 }
 
 // probeExitIP 通过隧道查询出口 IP，用于确认这条隧道确实换了 IP。
@@ -340,10 +473,19 @@ func (t *Tunnel) probeExitIP() (string, error) {
 	return ip, nil
 }
 
+// killOpenVPN 结束这条隧道的 openvpn 进程。必须在拆 netns 之前调用。
+func (t *Tunnel) killOpenVPN() {
+	t.mu.Lock()
+	if t.ovpn != nil && t.ovpn.Process != nil {
+		_ = t.ovpn.Process.Kill()
+	}
+	t.ovpn = nil
+	t.mu.Unlock()
+}
+
 // stop 停止这条隧道并清理它占用的所有资源。
 func (t *Tunnel) stop() {
 	t.mu.Lock()
-	defer t.mu.Unlock()
 	if t.listener != nil {
 		t.listener.Close()
 		t.listener = nil
@@ -352,6 +494,7 @@ func (t *Tunnel) stop() {
 		_ = t.ovpn.Process.Kill()
 		t.ovpn = nil
 	}
+	t.status = "stopped"
+	t.mu.Unlock()
 	t.teardownNetns()
-	t.Status = "stopped"
 }

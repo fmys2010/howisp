@@ -21,7 +21,7 @@ func (m *Manager) WatchHealth() {
 
 	for range time.Tick(healthInterval) {
 		for _, t := range m.Tunnels() {
-			if t.Status != "up" {
+			if t.statusOf() != "up" {
 				continue
 			}
 			if m.tunnelHealthy(t) {
@@ -31,13 +31,13 @@ func (m *Manager) WatchHealth() {
 
 			fails[t.Slot]++
 			if fails[t.Slot] < healthFailures {
-				log.Printf("隧道 %d (%s) 探测失败 %d 次", t.Slot, t.Node.HostName, fails[t.Slot])
+				log.Printf("隧道 %d (%s) 探测失败 %d 次", t.Slot, t.nodeOf().HostName, fails[t.Slot])
 				continue
 			}
 
-			log.Printf("隧道 %d (%s) 已掉线，正在换节点重连", t.Slot, t.Node.HostName)
+			log.Printf("隧道 %d (%s) 已掉线，正在换节点重连", t.Slot, t.nodeOf().HostName)
 			fails[t.Slot] = 0
-			m.reconnect(t, t.Node.HostName)
+			m.reconnect(t)
 		}
 	}
 }
@@ -59,60 +59,21 @@ func (m *Manager) tunnelHealthy(t *Tunnel) bool {
 		return false
 	}
 	// 出口 IP 变了说明 VPN 已经断开，流量退回了母机
-	return got == t.ExitIP
+	return got == t.exitIPOf()
 }
 
 // reconnect 就地把一条隧道换到别的节点上，保持槽位与端口不变，
 // 这样已经分发出去的客户端配置仍然可用。
-//
-// oldHost 必须是本次重连前那条隧道真正绑着的节点名。调用方若已经
-// 改过 t.Node（比如手动换节点），就要把改之前的名字传进来，
-// 否则 rebind 找不到旧绑定，入站会掉成孤儿。
-func (m *Manager) reconnect(t *Tunnel, oldHost string) {
-	t.Status = "starting"
-	t.Err = "正在换节点重连"
-	t.ExitIP = ""
+func (m *Manager) reconnect(t *Tunnel) {
+	t.setState("starting", "正在换节点重连")
+	t.setExitIP("")
 
-	// 动手之前先把"原来绑的是谁"落盘。
-	//
-	// 换节点是两步：连上新节点、再把入站改绑过来。两步之间崩溃或重启的话，
-	// 存盘的隧道已经是新节点、入站却还指着旧节点，那个入站就成了孤儿。
-	// 这条线索留在盘上，重启恢复时能照着把它接回来。
-	t.setPrevHost(oldHost)
-	if err := m.saveState(); err != nil {
-		log.Printf("保存状态失败: %v", err)
-	}
-
-	if t.ovpn != nil && t.ovpn.Process != nil {
-		_ = t.ovpn.Process.Kill()
-		t.ovpn = nil
-	}
+	// 先杀进程再拆 netns。顺序反了的话，openvpn 会继续活在已被删除的
+	// 命名空间里——只要有进程引用，那个 netns 就不会真正释放，
+	// 变成谁也看不见、谁也管不着的僵尸。
+	t.killOpenVPN()
 	t.teardownNetns()
 
-	go func() {
-		// 通知延后到 rebind/resync 之后：那两步会把入站改绑到新节点，
-		// 提前重建配置会因为入站还指着旧节点名而丢掉路由规则
-		m.bringUpPersist(t, false, true)
-		if t.Status != "up" {
-			return
-		}
-		// 出站 tag 跟着节点名走，换了节点就要把原来指向它的入站重新绑过去，
-		// 否则面板里的路由会指向一个已经不存在的出站。
-		if t.Node.HostName != oldHost {
-			if err := m.rebind(oldHost, t); err != nil {
-				log.Printf("重连后同步 3x-ui 绑定失败: %v", err)
-				return
-			}
-		} else if err := m.resync(t); err != nil {
-			// 节点名没变也要重写一次出站：出口 IP 可能变了，
-			// 而且上一轮换节点时留下的绑定需要重新指回来。
-			log.Printf("重连后重写 3x-ui 出站失败: %v", err)
-			return
-		}
-		// 入站已经跟过来了，标记可以清了
-		t.setPrevHost("")
-		if err := m.saveState(); err != nil {
-			log.Printf("保存状态失败: %v", err)
-		}
-	}()
+	// 重连是持久化行为：一轮候选全失败不放弃，退避后刷新节点列表再来
+	go m.bringUpPersist(t, true)
 }

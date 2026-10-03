@@ -3,7 +3,6 @@ package main
 import (
 	"encoding/json"
 	"fmt"
-	"log"
 	"os"
 	"path/filepath"
 )
@@ -20,9 +19,6 @@ type persistedTunnel struct {
 	// SOCKS5 凭据要存盘：用户已经把它分发给客户端了，重启后变掉等于全断
 	SocksUser string `json:"socks_user,omitempty"`
 	SocksPass string `json:"socks_pass,omitempty"`
-	// PrevHost 非空表示上次换节点只做了一半：隧道已经指向新节点，
-	// 但入站还绑在这个旧节点上。恢复时照着它把入站接回来。
-	PrevHost string `json:"prev_host,omitempty"`
 }
 
 type persistedState struct {
@@ -34,22 +30,21 @@ func statePath(dir string) string { return filepath.Join(dir, "state.json") }
 // saveState 把当前隧道写入磁盘，供重启后恢复。
 func (m *Manager) saveState() error {
 	var st persistedState
-	for _, t := range m.Tunnels() {
+	for _, v := range m.Views() {
 		// 只跳过用户主动停掉的。starting/failed 的隧道也要存：
 		// 它们正在重连或等着重试，漏存会让重启后凭空少几个出口。
-		if t.Status == "stopped" {
+		if v.Status == "stopped" {
 			continue
 		}
 		st.Tunnels = append(st.Tunnels, persistedTunnel{
-			Slot:        t.Slot,
-			Port:        t.Port,
-			HostName:    t.Node.HostName,
-			CountryCode: t.Node.CountryCode,
-			Country:     t.Node.Country,
-			Config:      t.Node.Config,
-			SocksUser:   t.Cred.User,
-			SocksPass:   t.Cred.Pass,
-			PrevHost:    t.prevHostOf(),
+			Slot:        v.Slot,
+			Port:        v.Port,
+			HostName:    v.Node.HostName,
+			CountryCode: v.Node.CountryCode,
+			Country:     v.Node.Country,
+			Config:      v.Node.Config,
+			SocksUser:   v.Cred.User,
+			SocksPass:   v.Cred.Pass,
 		})
 	}
 
@@ -82,9 +77,11 @@ func (m *Manager) restoreState() (int, error) {
 
 	// 从当前节点列表补回地区、延迟等元数据；节点已下线时退回存盘的最小信息
 	known := map[string]Node{}
+	m.mu.RLock()
 	for _, n := range m.nodes {
 		known[n.HostName] = n
 	}
+	m.mu.RUnlock()
 
 	for _, p := range st.Tunnels {
 		node, ok := known[p.HostName]
@@ -108,37 +105,15 @@ func (m *Manager) restoreState() (int, error) {
 		}
 		t := &Tunnel{
 			Slot:   p.Slot,
-			Port:   p.Port,
-			Node:   node,
-			Status: "starting",
-			Cred:   cred,
+			port:   p.Port,
+			node:   node,
+			status: "starting",
+			cred:   cred,
 		}
-		t.setPrevHost(p.PrevHost)
 		m.mu.Lock()
 		m.tunnels[p.Slot] = t
 		m.mu.Unlock()
-		go m.restoreTunnel(t)
+		go m.bringUpPersist(t, true)
 	}
 	return len(st.Tunnels), nil
-}
-
-// restoreTunnel 拉起一条恢复出来的隧道，顺手把上次没做完的换节点收尾。
-func (m *Manager) restoreTunnel(t *Tunnel) {
-	prev := t.prevHostOf()
-	m.bringUpPersist(t, true, true)
-	if prev == "" || t.Status != "up" {
-		return
-	}
-	// 上次换节点改完隧道就中断了，入站还指着旧节点。不接回来的话它会一直
-	// 显示成"未绑定出口"，流量悄悄走直连——用户看不出哪里不对。
-	if err := m.rebind(prev, t); err != nil {
-		log.Printf("恢复时把入站接回出口 %d 失败: %v", t.Slot, err)
-		return
-	}
-	log.Printf("出口 %d 上次换节点没收尾，已把原来绑着 %s 的入站接到 %s",
-		t.Slot, prev, t.Node.HostName)
-	t.setPrevHost("")
-	if err := m.saveState(); err != nil {
-		log.Printf("保存状态失败: %v", err)
-	}
 }

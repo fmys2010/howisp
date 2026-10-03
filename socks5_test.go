@@ -110,13 +110,3 @@ func TestValidateCred(t *testing.T) {
 	}
 }
 
-func TestSocksURL(t *testing.T) {
-	got := socksURL("1.2.3.4", 20000, SocksCred{User: "u", Pass: "p"})
-	if got != "socks5://u:p@1.2.3.4:20000" {
-		t.Fatalf("带凭据 URL 不对: %s", got)
-	}
-	got = socksURL("1.2.3.4", 20000, SocksCred{})
-	if got != "socks5://1.2.3.4:20000" {
-		t.Fatalf("无凭据 URL 不对: %s", got)
-	}
-}
