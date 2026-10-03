@@ -90,7 +90,7 @@ VPN Gate 的清单里混着一批它自己的机房服务器（`public-vpn-*` �
 
 ```
   状态      运行中
-  版本      fanout v1.4.0
+  版本      fanout v2.0.1
   开机自启  enabled
 
   管理地址  http://1.2.3.4:8899/gwPuWHvaNr/
