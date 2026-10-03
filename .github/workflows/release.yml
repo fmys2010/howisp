@@ -4,13 +4,32 @@ on:
   push:
     tags:
       - 'v*'
+  pull_request:
   workflow_dispatch:
 
 permissions:
   contents: write
 
 jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+
+      - name: 静态检查
+        run: go vet ./...
+
+      # 带上 -race：隧道状态会被健康检查、HTTP 接口和重连 goroutine
+      # 并发读写，竞态只有 race detector 能拦住。
+      - name: 测试
+        run: go test -race ./... -count=1
+
   build:
+    needs: test
     runs-on: ubuntu-latest
     strategy:
       matrix:

@@ -6,7 +6,7 @@ func mgrWith(nodes []Node, running ...string) *Manager {
 	m := NewManager(20, t_tmpdir)
 	m.nodes = nodes
 	for i, h := range running {
-		m.tunnels[i+1] = &Tunnel{Slot: i + 1, Node: Node{HostName: h}, Status: "up"}
+		m.tunnels[i+1] = &Tunnel{Slot: i + 1, node: Node{HostName: h}, status: "up"}
 	}
 	return m
 }

@@ -48,7 +48,8 @@ svc_install() {
     # 端口不写进服务文件：它由 ${WORK_DIR}/settings.json 决定（见 seed_settings），
     # 两处都写会互相拽回旧值——界面改完重启失效，或 f 改完被配置覆盖。
     # 老版本模板里可能还带 -web，一并去掉。
-    sed "s#-web [0-9]* ##; s#-dir /var/lib/fanout#-dir ${WORK_DIR}#" fanout.service \
+    [[ -n "$SERVICE_SRC" ]] || { echo "找不到 fanout.service，无法安装 systemd 服务" >&2; exit 1; }
+    sed "s#-web [0-9]* ##; s#-dir /var/lib/fanout#-dir ${WORK_DIR}#" "$SERVICE_SRC" \
       > /etc/systemd/system/fanout.service
     systemctl daemon-reload
   else
@@ -94,7 +95,7 @@ svc_logs_hint() {
   [[ "$INIT_SYS" == systemd ]] && echo "journalctl -u fanout -n 30" || echo "cat /var/log/fanout.log"
 }
 
-echo "[1/6] 检查依赖"
+echo "[1/5] 检查依赖"
 
 # 同一个命令在各发行版里的包名并不一致，按包管理器分别给出。
 pkg_for() {
@@ -106,7 +107,6 @@ pkg_for() {
     tar)      echo tar ;;
     ip)       case "$mgr" in apk) echo iproute2 ;; pacman) echo iproute2 ;; *) echo iproute ;; esac ;;
     iptables) echo iptables ;;
-    unzip)    echo unzip ;;
   esac
 }
 
@@ -159,7 +159,7 @@ if [[ ${#need_cmd[@]} -gt 0 ]]; then
   }
 fi
 
-echo "[2/6] 获取程序"
+echo "[2/5] 获取程序"
 REPO="${REPO:-byJoey/fanout}"
 ARCH=$(uname -m)
 case "$ARCH" in
@@ -168,9 +168,32 @@ case "$ARCH" in
   *) echo "      不支持的架构: $ARCH" >&2; exit 1 ;;
 esac
 
+# go_version_ok 判断本机 Go 是否够新。只看命令存不存在是不够的：
+# go.mod 声明 go 1.24，而 1.21 之前的版本不认识这个声明、也不会自动拉工具链，
+# 编译会在依赖里报一句 "package slices is not in GOROOT"，和真实原因完全对不上。
+go_version_ok() {
+  local v major rest minor
+  v=$(go version 2>/dev/null | awk '{print $3}')
+  v=${v#go}
+  major=${v%%.*}
+  rest=${v#*.}
+  minor=${rest%%.*}
+  [[ "$major" =~ ^[0-9]+$ && "$minor" =~ ^[0-9]+$ ]] || return 1
+  (( major > 1 || (major == 1 && minor >= 21) ))
+}
+
+SERVICE_SRC=""
+[[ -f fanout.service ]] && SERVICE_SRC=fanout.service
+
 if [[ -f main.go ]] && command -v go >/dev/null; then
-  echo "      从源码编译"
-  go build -trimpath -ldflags "-s -w" -o "$BIN" .
+  if ! go_version_ok; then
+    echo "      源码编译需要 Go 1.21+，当前是 $(go version 2>/dev/null | awk '{print $3}')" >&2
+    echo "      升级 Go 之后重跑本脚本；或者在别处下载预编译包解压使用" >&2
+    exit 1
+  fi
+  VERSION=$(git describe --tags --always --dirty 2>/dev/null || echo dev)
+  echo "      从源码编译（版本 ${VERSION}）"
+  go build -trimpath -ldflags "-s -w -X main.version=${VERSION}" -o "$BIN" .
 else
   echo "      下载预编译版本 (${GOARCH})"
   TMP=$(mktemp -d)
@@ -182,55 +205,17 @@ else
   fi
   tar xzf "$TMP/f.tar.gz" -C "$TMP"
   install -m 755 "$TMP/fanout" "$BIN"
-  [[ -f fanout.service ]] || cp "$TMP/fanout.service" .
+  # 服务文件用解压出来的那份，不要往当前目录写文件（那里可能不可写）
+  [[ -f "$TMP/fanout.service" ]] && SERVICE_SRC="$TMP/fanout.service"
   [[ -f "$TMP/f.sh" ]] && install -m 755 "$TMP/f.sh" /usr/local/bin/f
-  rm -rf "$TMP"
 fi
 
-echo "[3/6] 准备 Xray"
-# 没有现成面板接管时 fanout 自己跑 Xray，需要一份二进制。
-# 装到 WORK_DIR/bin 下而不是 /usr/local/bin，避免和机器上别人的 xray 抢版本。
-mkdir -p "${WORK_DIR}/bin"
-if command -v /usr/local/x-ui/x-ui >/dev/null 2>&1 || [[ -x /usr/bin/x-ui ]]; then
-  echo "      检测到 3x-ui，入站交给面板管，跳过"
-elif [[ -d /etc/xray-cf-lite && -f /usr/local/etc/xray/config.json ]]; then
-  echo "      检测到 xray-cf-lite，入站交给它管，跳过"
-elif [[ -x "${WORK_DIR}/bin/xray" ]]; then
-  echo "      已有 $("${WORK_DIR}/bin/xray" version 2>/dev/null | head -1)"
-else
-  case "$GOARCH" in
-    amd64) XRAY_ASSET=Xray-linux-64.zip ;;
-    arm64) XRAY_ASSET=Xray-linux-arm64-v8a.zip ;;
-  esac
-  echo "      下载 Xray (${XRAY_ASSET})"
-  XT=$(mktemp -d)
-  XURL="https://github.com/XTLS/Xray-core/releases/latest/download/${XRAY_ASSET}"
-  if curl -fsSL "$XURL" -o "$XT/x.zip"; then
-    # 只为解一个 zip 装 unzip 有点重，busybox 环境常自带
-    if command -v unzip >/dev/null; then
-      unzip -qo "$XT/x.zip" -d "$XT"
-    elif command -v busybox >/dev/null && busybox unzip -h >/dev/null 2>&1; then
-      busybox unzip -qo "$XT/x.zip" -d "$XT"
-    else
-      [[ -n "$MGR" ]] && install_pkgs "$MGR" unzip >/dev/null 2>&1 || true
-      command -v unzip >/dev/null && unzip -qo "$XT/x.zip" -d "$XT"
-    fi
-    if [[ -f "$XT/xray" ]]; then
-      install -m 755 "$XT/xray" "${WORK_DIR}/bin/xray"
-      echo "      $("${WORK_DIR}/bin/xray" version 2>/dev/null | head -1)"
-    else
-      echo "      解压失败，自建模式不可用（装了 3x-ui 则不受影响）" >&2
-    fi
-  else
-    echo "      下载失败，自建模式不可用（装了 3x-ui 则不受影响）" >&2
-  fi
-  rm -rf "$XT"
-fi
-
-echo "[4/6] 放行转发"
+echo "[3/5] 放行转发"
 sysctl -qw net.ipv4.ip_forward=1
-grep -q '^net.ipv4.ip_forward=1' /etc/sysctl.conf 2>/dev/null \
-  || echo 'net.ipv4.ip_forward=1' >> /etc/sysctl.conf
+# 写到独立文件而不是往 /etc/sysctl.conf 里追加：卸载时能干净删掉，
+# 也不会和用户自己的 sysctl 配置混在一起。
+mkdir -p /etc/sysctl.d
+echo 'net.ipv4.ip_forward=1' > /etc/sysctl.d/99-fanout.conf
 # FORWARD 链常有兜底 REJECT，fanout 用的网段要插到最前面
 if ! iptables -C FORWARD -s 10.99.0.0/16 -j ACCEPT 2>/dev/null; then
   iptables -I FORWARD 1 -s 10.99.0.0/16 -j ACCEPT
@@ -240,7 +225,7 @@ if ! iptables -C FORWARD -d 10.99.0.0/16 -j ACCEPT 2>/dev/null; then
 fi
 command -v netfilter-persistent >/dev/null && netfilter-persistent save >/dev/null 2>&1 || true
 
-echo "[5/6] 安装服务"
+echo "[4/5] 安装服务"
 # 管理菜单
 if [[ -f f.sh ]]; then
   install -m 755 f.sh /usr/local/bin/f
@@ -256,7 +241,7 @@ seed_settings
 svc_install
 svc_enable_start
 
-echo "[6/6] 就绪"
+echo "[5/5] 就绪"
 sleep 3
 svc_is_active && echo "      服务运行中（${INIT_SYS}）" || {
   echo "      服务启动失败，看 $(svc_logs_hint)" >&2

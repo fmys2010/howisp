@@ -257,6 +257,17 @@ show_links() {
   echo -e "  ${D}用着有问题、或者想要什么功能，去群里说或提 issue。${N}"
 }
 
+# del_fanout_rules 删掉 fanout 加过的 iptables 规则。
+# 逐条按规则原文删，只挑带 10.99. 的网段，不会碰到别的规则。
+del_fanout_rules() {
+  local table="$1" chain="$2" line
+  while IFS= read -r line; do
+    [[ -z $line ]] && continue
+    # shellcheck disable=SC2086
+    iptables -w 5 -t "$table" -D "$chain" ${line#-A $chain } 2>/dev/null || true
+  done < <(iptables -w 5 -t "$table" -S "$chain" 2>/dev/null | grep '10\.99\.')
+}
+
 # 老版本把 -web 写死在服务文件里，和 settings.json 互相拽回旧值。
 # 更新时把端口搬进配置再从服务文件里摘掉，之后只认一处。
 migrate_port_to_settings() {
@@ -306,13 +317,20 @@ do_uninstall() {
 
   svc_stop >/dev/null 2>&1
   svc_disable
-  # 清掉残留的 netns 与 veth
-  for ns in $(ip netns list 2>/dev/null | awk '{print $1}' | grep '^fo[0-9]'); do
+  # 清掉残留的 netns 与 veth。名字是 fo<实例标识><槽位>：实例标识是 4 位
+  # 十六进制（默认工作目录下为空），槽位是十进制，所以按
+  # ^fo[0-9a-f]*[0-9]$ 匹配，同机上多个实例留下的也一起收走。
+  for ns in $(ip netns list 2>/dev/null | awk '{print $1}' | grep -E '^fo[0-9a-f]*[0-9]$'); do
     ip netns del "$ns" 2>/dev/null
+    rm -rf "/etc/netns/$ns"
   done
-  for l in $(ip -o link show 2>/dev/null | awk -F': ' '{print $2}' | grep '^fov[0-9]'); do
+  for l in $(ip -o link show 2>/dev/null | awk -F': ' '{print $2}' | grep -E '^(fov|fop)[0-9a-f]*[0-9]$'); do
     ip link del "$l" 2>/dev/null
   done
+  # 隧道级 NAT/FORWARD 规则，以及安装时加的 10.99.0.0/16 放行规则
+  del_fanout_rules filter FORWARD
+  del_fanout_rules nat POSTROUTING
+  rm -f /etc/sysctl.d/99-fanout.conf
   rm -f "$UNIT" "$BIN" /usr/local/bin/f
   rm -rf "$WORK_DIR"
   svc_reload
@@ -360,8 +378,8 @@ menu() {
         fi
         pause ;;
       11) do_update; pause ;;
-      13) show_links; pause ;;
       12) do_uninstall; pause ;;
+      13) show_links; pause ;;
       0) exit 0 ;;
       *) ;;
     esac

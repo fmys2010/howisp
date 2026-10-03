@@ -140,22 +140,22 @@ var pool = []Node{
 func TestSwapAvoidsPreviousNode(t *testing.T) {
 	withResidentialOnly(t, boolPtr(true))
 	m := mgrWith(pool)
-	tn := &Tunnel{Slot: 1, Node: pool[0], Status: "up"}
+	tn := &Tunnel{Slot: 1, node: pool[0], status: "up"}
 	m.tunnels[1] = tn
 
-	seen := []string{tn.Node.HostName}
+	seen := []string{tn.nodeOf().HostName}
 	for i := 0; i < 2; i++ {
 		node, err := m.pickSwapTarget(tn)
 		if err != nil {
 			t.Fatalf("第 %d 次换节点挑不到: %v", i+1, err)
 		}
-		tn.Node = node
+		tn.setNode(node)
 		for _, h := range seen {
-			if h == tn.Node.HostName {
+			if h == tn.nodeOf().HostName {
 				t.Fatalf("第 %d 次换节点又换回了用过的 %s", i+1, h)
 			}
 		}
-		seen = append(seen, tn.Node.HostName)
+		seen = append(seen, tn.nodeOf().HostName)
 	}
 	if len(seen) != 3 {
 		t.Fatalf("三个节点应各用一次，实际 %v", seen)
@@ -167,7 +167,7 @@ func TestSwapAvoidsPreviousNode(t *testing.T) {
 func TestSwapRemembersFailedPick(t *testing.T) {
 	withResidentialOnly(t, boolPtr(true))
 	m := mgrWith(pool)
-	tn := &Tunnel{Slot: 1, Node: pool[0], Status: "up"} // 当前 jp1
+	tn := &Tunnel{Slot: 1, node: pool[0], status: "up"} // 当前 jp1
 	m.tunnels[1] = tn
 
 	// 第一次换节点：挑中 jp2
@@ -179,7 +179,7 @@ func TestSwapRemembersFailedPick(t *testing.T) {
 		t.Fatalf("按速度该挑到 jp2，实际 %s", first.HostName)
 	}
 	// jp2 连不上，候选机制把隧道落到了 jp3
-	tn.Node = pool[2]
+	tn.setNode(pool[2])
 
 	// 第二次换节点：不能再挑 jp2，它刚才就连不上
 	second, err := m.pickSwapTarget(tn)
@@ -199,7 +199,7 @@ func TestSwapRemembersFailedPick(t *testing.T) {
 func TestSwapHistoryResetAfterFullRound(t *testing.T) {
 	withResidentialOnly(t, boolPtr(true))
 	m := mgrWith(pool)
-	tn := &Tunnel{Slot: 1, Node: pool[2], Status: "up"}
+	tn := &Tunnel{Slot: 1, node: pool[2], status: "up"}
 	m.tunnels[1] = tn
 	tn.rememberSwap("jp1")
 	tn.rememberSwap("jp2")
@@ -219,7 +219,7 @@ func TestSwapHistoryResetAfterFullRound(t *testing.T) {
 
 // 历史有上限，不能无限攒着把自动重连的候选面排干。
 func TestSwapHistoryCapped(t *testing.T) {
-	tn := &Tunnel{Slot: 1, Node: Node{HostName: "cur"}}
+	tn := &Tunnel{Slot: 1, node: Node{HostName: "cur"}}
 	for i := 0; i < swapHistoryMax+5; i++ {
 		tn.rememberSwap(string(rune('a'+i%26)) + string(rune('0'+i/26)))
 	}
@@ -238,7 +238,7 @@ func TestSwapHistoryCapped(t *testing.T) {
 func TestCandidatesForKeepsCurrentFirstAndAvoidsSwapped(t *testing.T) {
 	withResidentialOnly(t, boolPtr(true))
 	m := mgrWith(pool)
-	tn := &Tunnel{Slot: 1, Node: pool[1], Status: "up"} // 当前 jp2
+	tn := &Tunnel{Slot: 1, node: pool[1], status: "up"} // 当前 jp2
 	m.tunnels[1] = tn
 	tn.rememberSwap("jp1") // jp1 是用户换掉的
 
@@ -338,7 +338,7 @@ func TestPickEveryRegionSlotsFull(t *testing.T) {
 	withResidentialOnly(t, boolPtr(true))
 	m := NewManager(1, t_tmpdir)
 	m.nodes = manyRegions
-	m.tunnels[1] = &Tunnel{Slot: 1, Node: manyRegions[0], Status: "up"}
+	m.tunnels[1] = &Tunnel{Slot: 1, node: manyRegions[0], status: "up"}
 	if _, err := m.pickEveryRegion(1); err == nil {
 		t.Fatal("槽位满了应当报错并说清楚怎么办")
 	} else if !strings.Contains(err.Error(), "槽位") {
