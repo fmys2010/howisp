@@ -3,8 +3,9 @@ package main
 import (
 	"fmt"
 	"log"
-	"os/exec"
+	"os"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 )
@@ -408,10 +409,23 @@ func (m *Manager) Shutdown() {
 	}
 }
 
-// prepareHost 打开转发开关。netns 出网依赖它。
+// prepareHost 确认转发开关是开的。netns 出网依赖它。
+//
+// 直接读写 /proc/sys，不调 sysctl：容器镜像里不一定有 procps，
+// 而这个开关是启动的硬依赖，少一个外部命令就少一处失败点。
+//
+// 容器里 /proc/sys 通常是只读挂载，写不进去。但跑容器的宿主本身
+// 几乎总是开着 ip_forward（Docker 自己就要），所以先读当前值：
+// 已经是 1 就直接放行，只有确实是 0 又写不动才报错。
 func prepareHost() error {
-	if err := cmdRun(exec.Command("sysctl", "-qw", "net.ipv4.ip_forward=1")); err != nil {
-		return fmt.Errorf("开启 ip_forward 失败: %w", err)
+	if blob, err := os.ReadFile("/proc/sys/net/ipv4/ip_forward"); err == nil {
+		if strings.TrimSpace(string(blob)) == "1" {
+			return nil
+		}
+	}
+	if err := os.WriteFile("/proc/sys/net/ipv4/ip_forward", []byte("1\n"), 0644); err != nil {
+		return fmt.Errorf("ip_forward 没开且改不动（容器里 /proc/sys 是只读的，"+
+			"需要在宿主上执行 sysctl -w net.ipv4.ip_forward=1）: %w", err)
 	}
 	return nil
 }

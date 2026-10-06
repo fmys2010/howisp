@@ -1,0 +1,29 @@
+# fanout 的容器跑法。
+#
+# 三个要点：
+#   1) network_mode: host —— fanout 建的 netns、iptables 规则和 SOCKS5 监听
+#      都要落在宿主的网络命名空间里，客户端才能直接连端口。用桥接网络的话
+#      随机分配的 SOCKS5 端口没法映射出去。
+#   2) NET_ADMIN + SYS_ADMIN —— 建 netns、改 iptables、起 openvpn 都要。
+#      图省事可以换成 privileged: true，但没必要。
+#   3) apparmor:unconfined —— ip netns add 会调 mount --make-shared，
+#      Docker 默认的 AppArmor 策略把这个 mount 挡成 EPERM。不加这条，
+#      隧道会以 "mount --make-shared /run/netns failed: Permission denied" 失败。
+services:
+  fanout:
+    image: ghcr.io/fmys2010/howisp:latest
+    # 想从源码构建就打开下面这行
+    # build: .
+    container_name: fanout
+    restart: unless-stopped
+    network_mode: host
+    cap_add:
+      - NET_ADMIN
+      - SYS_ADMIN
+    security_opt:
+      - apparmor:unconfined
+    devices:
+      - /dev/net/tun
+    volumes:
+      - /var/lib/fanout:/var/lib/fanout
+    command: ["-dir", "/var/lib/fanout"]

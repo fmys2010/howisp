@@ -347,6 +347,13 @@ func restartSelf() {
 		_ = exec.Command("rc-service", "fanout", "restart").Start()
 		return
 	}
+	// 容器里 fanout 就是 PID 1：没有 init 系统，但容器运行时带着重启策略
+	// （docker run --restart / compose 的 restart:），退出即可让它用
+	// 刚替换好的新二进制把自己拉起来。
+	if os.Getpid() == 1 {
+		fmt.Println("fanout: 已替换二进制，退出进程让容器重启策略拉起新版本")
+		os.Exit(0)
+	}
 	// 没有 init 系统托管：直接退出，让外部守护（若有）拉起；
 	// 没有守护就只能等下次手动启动。日志留个痕。
 	fmt.Println("fanout: 已替换二进制，但未检测到 systemd/openrc，请手动重启服务")

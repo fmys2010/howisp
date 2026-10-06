@@ -40,7 +40,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/byJoey/fanout/main/install.s
 
 依赖（openvpn / curl / openssl / iproute / iptables）会按发行版自动装，
 apt、dnf、yum、pacman、apk、zypper 都认。服务用 systemd 或 OpenRC 都能装，
-装完自动开机自启。
+装完自动开机自启。不想动宿主环境也可以跑容器，见下面的 Docker 一节。
 
 **Alpine** 默认不带 bash，先装一下：
 
@@ -58,6 +58,44 @@ bash <(curl -fsSL https://raw.githubusercontent.com/byJoey/fanout/main/install.s
 
 路径和口令都是随机生成的，分别存在 `/var/lib/fanout/basepath` 和
 `/var/lib/fanout/password`。路径不对一律返回 404，扫端口的看不到这里跑着什么。
+
+### Docker
+
+镜像在 `ghcr.io/fmys2010/howisp`，amd64 与 arm64 都有：
+
+```bash
+docker run -d --name fanout \
+  --restart unless-stopped \
+  --network host \
+  --cap-add NET_ADMIN --cap-add SYS_ADMIN \
+  --security-opt apparmor=unconfined \
+  --device /dev/net/tun \
+  -v /var/lib/fanout:/var/lib/fanout \
+  ghcr.io/fmys2010/howisp:latest
+```
+
+四点必须注意：
+
+- 用 **host 网络**。fanout 建的 netns、iptables 规则和 SOCKS5 端口都落在宿主的网络命名空间里，
+  桥接网络下随机分配的端口没法映射出去。
+- 需要 **NET_ADMIN + SYS_ADMIN** 和 `/dev/net/tun`（图省事可以整体换成 `--privileged`）。
+- 需要 **`--security-opt apparmor=unconfined`**。`ip netns add` 会调 `mount --make-shared`，
+  Docker 默认的 AppArmor 策略会把它拦成 EPERM，隧道会以
+  `mount --make-shared /run/netns failed: Permission denied` 失败。
+- `/var/lib/fanout` 挂出来，重建容器后口令、访问路径和隧道状态都还在。
+
+宿主上要开着 `net.ipv4.ip_forward`（跑 Docker 的机器默认就是开的）。容器里 `/proc/sys` 是只读的，
+fanout 会读一下当前值，已经是 1 就直接用；如果宿主上确实是 0，需要在宿主执行
+`sysctl -w net.ipv4.ip_forward=1`。
+
+仓库里带了 `docker-compose.yml`，可以直接：
+
+```bash
+docker compose up -d
+```
+
+停容器请用 `docker stop`——它会发 SIGTERM，fanout 会把 netns、veth 和 iptables 清干净。
+`docker kill` 会留下宿主侧的 veth 和规则，不过下次启动恢复隧道时会自动收尾。
 
 ## 使用
 
