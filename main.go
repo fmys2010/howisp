@@ -147,7 +147,7 @@ func main() {
 	mux.HandleFunc("/api/update/apply", apiUpdateApply)
 
 	log.Printf("管理界面: http://<本机IP>%s%s/", webCfg.listenAddrString(), currentBasePath())
-	log.Printf("SOCKS5 端口在 %d-%d 之间随机分配", randPortMin, randPortMax)
+	log.Printf("代理端口（SOCKS5 / HTTP）在 %d-%d 之间随机分配", randPortMin, randPortMax)
 	if err := srv.serve(); err != nil {
 		log.Fatal(err)
 	}

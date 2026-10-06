@@ -438,7 +438,8 @@ func (t *Tunnel) serve() error {
 			}
 			// 每次连接现取凭据：改口令后不必重建监听，新连接立刻按新凭据校验
 			cred := t.credential()
-			go serveSocks(conn, &cred, dial)
+			// 混合端口：同一个端口既收 SOCKS5 也收 HTTP 代理
+			go serveMixed(conn, &cred, dial)
 		}
 	}()
 	return nil

@@ -2,8 +2,9 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-把 VPN Gate 的公共节点变成本地 SOCKS5 端口：一个端口一个出口 IP。
-客户端连哪个端口，就从哪个国家出去。
+把 VPN Gate 的公共节点变成本地代理端口：一个端口一个出口 IP。
+每个端口都是**混合端口**，SOCKS5 和 HTTP 代理两种协议都收，客户端连哪个端口，
+就从哪个国家出去。
 
 ![主界面](https://images.joeyblog.net/2026/7/27/fanout-dashboard.png)
 
@@ -23,8 +24,13 @@ SOCKS5 监听在母机，出站连接用 `setns` 切进对应 netns 建立。
 客户端 ──> 母机 SOCKS5 :随机端口 ──> netns foN ──> openvpn ──> VPN Gate 节点
 ```
 
-SOCKS5 支持 CONNECT 与 UDP ASSOCIATE（RFC1928），DNS/QUIC 这类 UDP 也走隧道。
-每个端口一套独立的用户名/口令（RFC1929），端口对公网敞开，没有口令等于谁扫到谁能用。
+端口上两种协议同时可用：
+
+- **SOCKS5**：CONNECT 与 UDP ASSOCIATE（RFC1928），DNS/QUIC 这类 UDP 也走隧道
+- **HTTP 代理**：CONNECT 与普通请求（绝对 URL 形式）
+
+两种协议共用同一套用户名/口令——SOCKS5 走 RFC1929，HTTP 走 `Proxy-Authorization: Basic`。
+端口对公网敞开，没有口令等于谁扫到谁能用。
 
 ## 安装
 
@@ -117,8 +123,9 @@ cp docker-compose.yml.example docker-compose.yml
 每行右侧的按钮可以换一个节点（出口 IP 变、端口不变，已分发的客户端配置不用改），
 或者停掉这个出口。换节点会避开这条出口之前用过的节点，连点几次每次都是新 IP。
 
-点「连接信息」能看到 `socks5://用户名:口令@母机IP:端口` 形式的完整地址，直接复制给客户端。
-口令可以单独重置，重置后旧地址立即失效。
+点「连接信息」能看到完整地址，`socks5://` 和 `http://` 两种形式都给出来，直接复制给客户端。
+用哪个看客户端支持什么：只认 HTTP 代理的程序（比如 Python 的 urllib）就用 `http://` 那条。
+口令可以单独重置，重置后两种地址一起失效。
 
 ### 只用家宽
 

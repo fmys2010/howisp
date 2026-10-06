@@ -240,7 +240,7 @@ label.chk input{margin:0}
 <div class="modal" id="credbox">
   <div class="sheet">
     <div class="head">
-      <h2>SOCKS5 访问凭据</h2>
+      <h2>代理访问凭据</h2>
       <span class="count" id="crtitle"></span>
       <span class="spacer"></span>
       <button class="icon" data-close="credbox" title="关闭">
@@ -248,7 +248,9 @@ label.chk input{margin:0}
       </button>
     </div>
     <div class="body">
+      <div class="hint" style="margin-bottom:8px">这个端口同时支持 SOCKS5 和 HTTP 代理，两种地址都能用：</div>
       <div class="share" id="crurl"></div>
+      <div class="share" id="crurlhttp"></div>
       <div class="credrow">
         <label class="ef"><span>用户名</span>
           <input id="cruser" type="text" spellcheck="false"></label>
@@ -412,9 +414,9 @@ function renderExits(){
       +   '<span class="ip">' + esc(label) + '</span>'
       +   '<span class="meta">' + place + ' · ' + esc(e.host) + '</span>'
       +   '<span class="socks">'
-      +     '<button data-cred="' + e.slot + '" title="SOCKS5 访问凭据（改口令）">' + ICON.lock + ':' + e.port + '</button>'
+      +     '<button data-cred="' + e.slot + '" title="代理访问凭据（改口令）">' + ICON.lock + ':' + e.port + '</button>'
       +     '<span class="addr" title="' + esc(url) + '">' + esc(url) + '</span>'
-      +     '<button class="icon" data-copy="' + esc(url) + '" title="复制 SOCKS5 地址">' + ICON.copy + '</button>'
+      +     '<button class="icon" data-copy="' + esc(url) + '" title="复制 SOCKS5 地址（同一端口也支持 HTTP 代理）">' + ICON.copy + '</button>'
       +   '</span>'
       +   '<span class="acts">'
       +     '<button class="icon" data-swap="' + e.slot + '" title="换一个节点">' + ICON.redo + '</button>'
@@ -620,9 +622,14 @@ document.addEventListener('click', e => {
 // ---- SOCKS5 凭据 ----
 let curCred = null;
 
+// 同一个端口同时支持 SOCKS5 与 HTTP 代理，两种地址都给出来
 function socksURL(host, port, user, pass){
   if(!user) return 'socks5://' + host + ':' + port;
   return 'socks5://' + user + ':' + pass + '@' + host + ':' + port;
+}
+function httpProxyURL(host, port, user, pass){
+  if(!user) return 'http://' + host + ':' + port;
+  return 'http://' + user + ':' + pass + '@' + host + ':' + port;
 }
 
 // SOCKS5 端口监听在母机（跑 fanout 的这台服务器）上，客户端要连的是母机的
@@ -645,8 +652,10 @@ function openCred(slot){
 
 function refreshCredURL(){
   if(!curCred) return;
-  $('#crurl').textContent = socksURL(curCred.host, curCred.port,
-    $('#cruser').value.trim(), $('#crpass').value.trim());
+  const host = curCred.host, port = curCred.port;
+  const user = $('#cruser').value.trim(), pass = $('#crpass').value.trim();
+  $('#crurl').textContent = socksURL(host, port, user, pass);
+  $('#crurlhttp').textContent = httpProxyURL(host, port, user, pass);
 }
 $('#cruser').oninput = refreshCredURL;
 $('#crpass').oninput = refreshCredURL;

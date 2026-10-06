@@ -13,11 +13,10 @@ import (
 )
 
 // SOCKS5 实现：支持 CONNECT（TCP）与 UDP ASSOCIATE（UDP 中继，见 udp.go）。
-// 域名在本进程内解析，隧道里只跑 TCP 时不用隧道内的 UDP/DNS；
-// UDP 中继则把客户端的 UDP 包放进隧道（netns）转发。
 //
-// 认证走 RFC1929 用户名/口令。端口对公网敞开，没有口令等于谁扫到谁就能用
-// 这条家宽出口，所以凭据是必需的而不是可选项。
+// 监听在混合端口上，HTTP 代理见 http_proxy.go，两者共用同一套用户名/口令。
+// 认证走 RFC1929。端口对公网敞开，没有口令等于谁扫到谁就能用这条家宽出口，
+// 所以凭据是必需的而不是可选项。
 
 const (
 	socksVer5       = 0x05
@@ -36,17 +35,19 @@ const (
 	repCmdNotSupp   = 0x07
 )
 
-// serveSocks 处理一条 SOCKS5 连接。dial 决定流量从哪条链路出去。
-// cred 为 nil 时不要求认证（内部调用路径不会走到，这里只是兜底）。
-func serveSocks(client net.Conn, cred *SocksCred, dial func(network, addr string) (net.Conn, error)) {
+// serveSocks 处理一条 SOCKS5 连接。
+//
+// r 是已经缓冲了首字节的读取器：握手和转发都必须从它读，直接读裸 conn
+// 会把缓冲区里已有的数据丢掉（混合端口预读的那一个字节就属于这种情况）。
+func serveSocks(client net.Conn, r io.Reader, cred *SocksCred, dial dialFunc) {
 	defer client.Close()
 	_ = client.SetDeadline(time.Now().Add(30 * time.Second))
 
-	if err := socksHandshake(client, cred); err != nil {
+	if err := socksHandshake(client, r, cred); err != nil {
 		return
 	}
 
-	cmd, addr, err := socksReadRequestWithCmd(client)
+	cmd, addr, err := socksReadRequestWithCmd(r)
 	if err != nil {
 		if errors.Is(err, errCmdNotSupported) {
 			socksReply(client, repCmdNotSupp)
@@ -76,20 +77,20 @@ func serveSocks(client net.Conn, cred *SocksCred, dial func(network, addr string
 	// 转发阶段不设整体超时，交给两端自然关闭
 	_ = client.SetDeadline(time.Time{})
 	_ = remote.SetDeadline(time.Time{})
-	relay(client, remote)
+	relay(client, r, remote)
 }
 
 // socksHandshake 完成方法协商，需要认证时接着跑一轮 RFC1929。
-func socksHandshake(c net.Conn, cred *SocksCred) error {
+func socksHandshake(c net.Conn, r io.Reader, cred *SocksCred) error {
 	head := make([]byte, 2)
-	if _, err := io.ReadFull(c, head); err != nil {
+	if _, err := io.ReadFull(r, head); err != nil {
 		return err
 	}
 	if head[0] != socksVer5 {
 		return errors.New("不是 socks5")
 	}
 	methods := make([]byte, int(head[1]))
-	if _, err := io.ReadFull(c, methods); err != nil {
+	if _, err := io.ReadFull(r, methods); err != nil {
 		return err
 	}
 
@@ -106,23 +107,23 @@ func socksHandshake(c net.Conn, cred *SocksCred) error {
 	if _, err := c.Write([]byte{socksVer5, authUserPass}); err != nil {
 		return err
 	}
-	return socksAuth(c, cred)
+	return socksAuth(c, r, cred)
 }
 
 // socksAuth 跑一轮 RFC1929 用户名/口令子协商。
-func socksAuth(c net.Conn, cred *SocksCred) error {
+func socksAuth(c net.Conn, r io.Reader, cred *SocksCred) error {
 	ver := make([]byte, 1)
-	if _, err := io.ReadFull(c, ver); err != nil {
+	if _, err := io.ReadFull(r, ver); err != nil {
 		return err
 	}
 	if ver[0] != authSubVer {
 		return errors.New("认证子协议版本不对")
 	}
-	user, err := readLenPrefixed(c)
+	user, err := readLenPrefixed(r)
 	if err != nil {
 		return err
 	}
-	pass, err := readLenPrefixed(c)
+	pass, err := readLenPrefixed(r)
 	if err != nil {
 		return err
 	}
@@ -139,13 +140,13 @@ func socksAuth(c net.Conn, cred *SocksCred) error {
 }
 
 // readLenPrefixed 读一个单字节长度前缀的字段。
-func readLenPrefixed(c net.Conn) ([]byte, error) {
+func readLenPrefixed(r io.Reader) ([]byte, error) {
 	l := make([]byte, 1)
-	if _, err := io.ReadFull(c, l); err != nil {
+	if _, err := io.ReadFull(r, l); err != nil {
 		return nil, err
 	}
 	b := make([]byte, int(l[0]))
-	if _, err := io.ReadFull(c, b); err != nil {
+	if _, err := io.ReadFull(r, b); err != nil {
 		return nil, err
 	}
 	return b, nil
@@ -157,8 +158,8 @@ var errCmdNotSupported = errors.New("仅支持 CONNECT 与 UDP ASSOCIATE")
 var errIPv6NotSupported = errors.New("隧道内不支持 IPv6")
 
 // socksReadRequest 读请求并返回目标地址（仅 CONNECT，兼容旧调用）。
-func socksReadRequest(c net.Conn) (string, error) {
-	cmd, addr, err := socksReadRequestWithCmd(c)
+func socksReadRequest(r io.Reader) (string, error) {
+	cmd, addr, err := socksReadRequestWithCmd(r)
 	if err != nil {
 		return "", err
 	}
@@ -169,9 +170,9 @@ func socksReadRequest(c net.Conn) (string, error) {
 }
 
 // socksReadRequestWithCmd 读请求并返回命令与目标地址，支持 CONNECT 与 UDP ASSOCIATE。
-func socksReadRequestWithCmd(c net.Conn) (byte, string, error) {
+func socksReadRequestWithCmd(r io.Reader) (byte, string, error) {
 	head := make([]byte, 4)
-	if _, err := io.ReadFull(c, head); err != nil {
+	if _, err := io.ReadFull(r, head); err != nil {
 		return 0, "", err
 	}
 	switch head[1] {
@@ -184,24 +185,24 @@ func socksReadRequestWithCmd(c net.Conn) (byte, string, error) {
 	switch head[3] {
 	case atypIPv4:
 		b := make([]byte, 4)
-		if _, err := io.ReadFull(c, b); err != nil {
+		if _, err := io.ReadFull(r, b); err != nil {
 			return 0, "", err
 		}
 		host = net.IP(b).String()
 	case atypIPv6:
 		// 隧道内没有 IPv6 路由，放行只会让这条连接绕开隧道
 		b := make([]byte, 16)
-		if _, err := io.ReadFull(c, b); err != nil {
+		if _, err := io.ReadFull(r, b); err != nil {
 			return 0, "", err
 		}
 		return 0, "", errIPv6NotSupported
 	case atypDomain:
 		l := make([]byte, 1)
-		if _, err := io.ReadFull(c, l); err != nil {
+		if _, err := io.ReadFull(r, l); err != nil {
 			return 0, "", err
 		}
 		b := make([]byte, int(l[0]))
-		if _, err := io.ReadFull(c, b); err != nil {
+		if _, err := io.ReadFull(r, b); err != nil {
 			return 0, "", err
 		}
 		host = string(b)
@@ -210,7 +211,7 @@ func socksReadRequestWithCmd(c net.Conn) (byte, string, error) {
 	}
 
 	pb := make([]byte, 2)
-	if _, err := io.ReadFull(c, pb); err != nil {
+	if _, err := io.ReadFull(r, pb); err != nil {
 		return 0, "", err
 	}
 	return head[1], net.JoinHostPort(host, strconv.Itoa(int(binary.BigEndian.Uint16(pb)))), nil
@@ -234,9 +235,13 @@ func socksReplyWith(c net.Conn, code byte, ip net.IP, port int) error {
 	return err
 }
 
-func relay(a, b net.Conn) {
+// relay 双向转发，任一方向结束就返回（调用方负责关连接）。
+//
+// clientR 是读客户端那一侧用的读取器：混合端口下它可能带着预读的数据，
+// 所以不能直接用 client 读。
+func relay(client net.Conn, clientR io.Reader, remote net.Conn) {
 	done := make(chan struct{}, 2)
-	go func() { io.Copy(a, b); done <- struct{}{} }()
-	go func() { io.Copy(b, a); done <- struct{}{} }()
+	go func() { _, _ = io.Copy(remote, clientR); done <- struct{}{} }()
+	go func() { _, _ = io.Copy(client, remote); done <- struct{}{} }()
 	<-done
 }
