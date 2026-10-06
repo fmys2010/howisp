@@ -1,0 +1,43 @@
+# fanout 的 docker compose 模板。
+#
+#   cp docker-compose.yml.example docker-compose.yml
+#   docker compose up -d
+#
+# 仓库里那份 docker-compose.yml 内容一样、开箱即用；这个模板是留给你本地改了
+# 之后用的——复制出去再改，就不会和仓库版本冲突。
+
+services:
+  fanout:
+    image: ghcr.io/fmys2010/howisp:latest
+    container_name: fanout
+    restart: unless-stopped
+
+    # 必须用宿主网络：fanout 建的 netns、iptables 规则和 SOCKS5 监听都落在
+    # 宿主的网络命名空间里，桥接网络下随机分配的 SOCKS5 端口没法映射出去。
+    network_mode: host
+
+    # 建 netns、改 iptables、在 netns 里跑 openvpn 都要这两项。
+    # 图省事可以整体换成 privileged: true。
+    cap_add:
+      - NET_ADMIN
+      - SYS_ADMIN
+
+    # 这一行不能少：ip netns add 会调 mount --make-shared，
+    # Docker 默认的 AppArmor 策略会把它拦成 EPERM，隧道会以
+    # "mount --make-shared /run/netns failed: Permission denied" 失败。
+    security_opt:
+      - apparmor:unconfined
+
+    devices:
+      - /dev/net/tun
+
+    volumes:
+      # 口令、访问路径、隧道状态都在这里，换容器不用重新配置
+      - /var/lib/fanout:/var/lib/fanout
+
+    # 想从源码构建，就把上面的 image: 换成这一行
+    # build: .
+
+    # 管理端口默认 8899（由 settings.json 决定），想换端口就加参数：
+    # command: ["-dir", "/var/lib/fanout", "-web", "9000"]
+    command: ["-dir", "/var/lib/fanout"]

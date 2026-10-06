@@ -88,10 +88,17 @@ docker run -d --name fanout \
 fanout 会读一下当前值，已经是 1 就直接用；如果宿主上确实是 0，需要在宿主执行
 `sysctl -w net.ipv4.ip_forward=1`。
 
-仓库里带了 `docker-compose.yml`，可以直接：
+仓库里带了开箱即用的 `docker-compose.yml`，直接：
 
 ```bash
 docker compose up -d
+```
+
+想改成自己的配置（换端口、换卷路径、改成从源码构建），复制一份模板再改，
+这样不会和仓库版本打架：
+
+```bash
+cp docker-compose.yml.example docker-compose.yml
 ```
 
 停容器请用 `docker stop`——它会发 SIGTERM，fanout 会把 netns、veth 和 iptables 清干净。

@@ -4,4 +4,4 @@
 *.log
 *.exe
 Dockerfile
-docker-compose.yml
+docker-compose*.yml*
