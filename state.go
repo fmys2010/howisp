@@ -10,6 +10,8 @@ import (
 // persistedTunnel 是隧道在磁盘上的形态。
 // 只存重建所需的信息，运行态（netns、进程、监听）重启后重新建立。
 type persistedTunnel struct {
+	// Provider 空表示 VPN Gate，老版本的状态文件里没有这个字段
+	Provider    string `json:"provider,omitempty"`
 	Slot        int    `json:"slot"`
 	Port        int    `json:"port"`
 	HostName    string `json:"hostname"`
@@ -25,6 +27,25 @@ type persistedState struct {
 	Tunnels []persistedTunnel `json:"tunnels"`
 }
 
+// node 把存盘的记录还原成节点。known 是当前的 VPN Gate 节点列表，用来补回地区、延迟等元数据。
+func (p persistedTunnel) node(known map[string]Node) Node {
+	if p.Provider == providerPsiphon {
+		// Psiphon 出口只认地区，服务器由 psiphon 自己从 datastore 里接着用
+		return psiphonNode(p.CountryCode)
+	}
+	node, ok := known[p.HostName]
+	if !ok {
+		// 节点已从 VPN Gate 列表消失，用存盘的信息重建
+		node = Node{
+			HostName:    p.HostName,
+			CountryCode: p.CountryCode,
+			Country:     p.Country,
+		}
+	}
+	node.Config = p.Config
+	return node
+}
+
 func statePath(dir string) string { return filepath.Join(dir, "state.json") }
 
 // saveState 把当前隧道写入磁盘，供重启后恢复。
@@ -37,6 +58,7 @@ func (m *Manager) saveState() error {
 			continue
 		}
 		st.Tunnels = append(st.Tunnels, persistedTunnel{
+			Provider:    v.Node.Provider,
 			Slot:        v.Slot,
 			Port:        v.Port,
 			HostName:    v.Node.HostName,
@@ -84,16 +106,7 @@ func (m *Manager) restoreState() (int, error) {
 	m.mu.RUnlock()
 
 	for _, p := range st.Tunnels {
-		node, ok := known[p.HostName]
-		if !ok {
-			// 节点已从 VPN Gate 列表消失，用存盘的信息重建
-			node = Node{
-				HostName:    p.HostName,
-				CountryCode: p.CountryCode,
-				Country:     p.Country,
-			}
-		}
-		node.Config = p.Config
+		node := p.node(known)
 		// 从旧版本升上来的状态文件没有凭据字段，补一套新的
 		cred := SocksCred{User: p.SocksUser, Pass: p.SocksPass}
 		if cred.User == "" || cred.Pass == "" {

@@ -17,7 +17,8 @@ import (
 type dialFunc func(network, addr string) (net.Conn, error)
 
 // serveMixed 是混合端口的入口，按首字节把连接分给 SOCKS5 或 HTTP 代理。
-func serveMixed(client net.Conn, cred *SocksCred, dial dialFunc) {
+// udp 表示这个出口能不能转 UDP，不能的话 SOCKS5 的 UDP ASSOCIATE 直接回"不支持"。
+func serveMixed(client net.Conn, cred *SocksCred, dial dialFunc, udp bool) {
 	br := bufio.NewReader(client)
 	head, err := br.Peek(1)
 	if err != nil {
@@ -26,7 +27,7 @@ func serveMixed(client net.Conn, cred *SocksCred, dial dialFunc) {
 	}
 	switch {
 	case head[0] == socksVer5:
-		serveSocks(client, br, cred, dial)
+		serveSocks(client, br, cred, dial, udp)
 	case head[0] >= 'A' && head[0] <= 'Z':
 		serveHTTP(client, br, cred, dial)
 	default:

@@ -10,8 +10,10 @@ import (
 
 // ProvisionRequest 是"给我 N 个某地区的出口"这个意图。
 type ProvisionRequest struct {
-	Region     string // 国家码，空表示不限
-	Count      int
+	// Provider 是出口来源：空表示 VPN Gate，"psiphon" 表示 Psiphon。
+	Provider string
+	Region   string // 国家码，空表示不限
+	Count    int
 	// EveryRegion 表示每个有节点的国家都来 Count 个，此时 Region 被忽略。
 	EveryRegion bool
 }
@@ -23,11 +25,23 @@ func (m *Manager) Provision(req ProvisionRequest) (*Job, error) {
 	if req.Count < 1 {
 		return nil, fmt.Errorf("数量至少为 1")
 	}
+	psiphon := req.Provider == providerPsiphon
+	if req.Provider != "" && !psiphon {
+		return nil, fmt.Errorf("不认识的出口来源 %q", req.Provider)
+	}
+	if psiphon {
+		if err := psiphonSupported(); err != nil {
+			return nil, err
+		}
+	}
 	var picks []Node
 	var err error
-	if req.EveryRegion {
+	switch {
+	case psiphon:
+		picks, err = m.pickPsiphon(req.Region, req.Count, req.EveryRegion)
+	case req.EveryRegion:
 		picks, err = m.pickEveryRegion(req.Count)
-	} else {
+	default:
 		picks, err = m.pickNodes(req.Region, req.Count, nil)
 	}
 	if err != nil {
@@ -39,14 +53,18 @@ func (m *Manager) Provision(req ProvisionRequest) (*Job, error) {
 		labels = append(labels, regionLabel(n)+" 出口")
 	}
 
+	kind := ""
+	if psiphon {
+		kind = " Psiphon"
+	}
 	title := ""
 	switch {
 	case req.EveryRegion:
-		title = fmt.Sprintf("每个国家开 %d 个，共 %d 条出口", req.Count, len(picks))
+		title = fmt.Sprintf("每个国家开 %d 个，共 %d 条%s出口", req.Count, len(picks), kind)
 	case req.Region != "":
-		title = fmt.Sprintf("开 %d 个 %s 出口", len(picks), req.Region)
+		title = fmt.Sprintf("开 %d 个 %s%s 出口", len(picks), strings.ToUpper(req.Region), kind)
 	default:
-		title = fmt.Sprintf("开 %d 个任意地区出口", len(picks))
+		title = fmt.Sprintf("开 %d 个任意地区%s出口", len(picks), kind)
 	}
 	job := m.jobs.New(title, labels)
 
@@ -64,7 +82,11 @@ func (m *Manager) runProvision(job *Job, picks []Node) {
 			job.Set(i, "failed", err.Error())
 			continue
 		}
-		job.Set(i, "running", "正在连接 "+node.HostName)
+		target := node.HostName
+		if node.isPsiphon() {
+			target = "Psiphon"
+		}
+		job.Set(i, "running", "正在连接 "+target)
 
 		wg.Add(1)
 		go func(i int, t *Tunnel) {
@@ -193,6 +215,41 @@ func (m *Manager) pickEveryRegion(perRegion int) ([]Node, error) {
 	return out, nil
 }
 
+// pickPsiphon 给 Psiphon 出口凑出 count 个目标。
+//
+// 和 VPN Gate 不同，Psiphon 的服务器不是我们挑的，同一地区开几条都行，
+// 不存在"节点被占用"，唯一的约束是槽位。every 表示每个地区各 count 个；
+// 装不下时按地区顺序截断，和 pickEveryRegion 一样不中途报错。
+func (m *Manager) pickPsiphon(region string, count int, every bool) ([]Node, error) {
+	if count < 1 {
+		count = 1
+	}
+	m.mu.RLock()
+	room := m.maxSlots - len(m.tunnels)
+	m.mu.RUnlock()
+	if room <= 0 {
+		return nil, fmt.Errorf("槽位已满（上限 %d），先停几个出口再来", m.maxSlots)
+	}
+
+	regions := []string{strings.ToUpper(strings.TrimSpace(region))}
+	if every {
+		regions = psiphonRegions()
+	} else if regions[0] != "" && !validRegionCode(regions[0]) {
+		return nil, fmt.Errorf("地区 %q 不是两位国家码", region)
+	}
+
+	var out []Node
+	for _, r := range regions {
+		for i := 0; i < count; i++ {
+			if len(out) >= room {
+				return out, nil
+			}
+			out = append(out, psiphonNode(r))
+		}
+	}
+	return out, nil
+}
+
 // noNodesErrLocked 拼一句能照着做的错误。调用方必须已持 m.mu。
 //
 // 挑不到节点有好几种原因，报一句笼统的"没有可用节点"会让人无从下手：
@@ -277,8 +334,30 @@ func (m *Manager) Regions() []RegionStat {
 	return out
 }
 
+// PsiphonRegions 列出 Psiphon 可选的出口地区，给新建向导用。
+//
+// Psiphon 一个地区能开几条只受槽位限制，所以 Available 填的是剩余槽位，
+// 向导拿它做上限，和 VPN Gate 的"空闲节点数"一个用法。
+func (m *Manager) PsiphonRegions() []RegionStat {
+	m.mu.RLock()
+	room := m.maxSlots - len(m.tunnels)
+	m.mu.RUnlock()
+	if room < 0 {
+		room = 0
+	}
+	codes := psiphonRegions()
+	out := make([]RegionStat, 0, len(codes))
+	for _, code := range codes {
+		out = append(out, RegionStat{Code: code, Name: countryLabel(code, ""), Available: room})
+	}
+	return out
+}
+
 // regionLabel 给出口起一个人能读的名字。
 func regionLabel(n Node) string {
+	if n.isPsiphon() {
+		return psiphonRegionText(n) + " · Psiphon"
+	}
 	if place := nodeLabel(n); place != "" {
 		return place
 	}

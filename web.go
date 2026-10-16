@@ -118,6 +118,13 @@ label.f>span{display:block;color:var(--dim);font-size:11px;margin-bottom:6px}
 .rg b{font-weight:600;font-size:12px;display:block;overflow:hidden;
   text-overflow:ellipsis;white-space:nowrap}
 .rg em{display:block;font-style:normal;color:var(--dim);font-size:11px;margin-top:2px}
+.seg{display:flex;width:fit-content;border:1px solid var(--line);border-radius:4px;
+  overflow:hidden;background:#0e1116}
+.seg button{border:0;border-radius:0;background:transparent;padding:5px 14px}
+.seg button+button{border-left:1px solid var(--line)}
+.seg button.sel{background:rgba(74,158,218,.16);color:var(--accent)}
+.tag{display:inline-block;font-size:10px;line-height:1;padding:2px 5px;margin-right:6px;
+  border:1px solid rgba(201,144,58,.4);border-radius:3px;color:var(--warn);vertical-align:1px}
 .stepper{display:flex;align-items:center;gap:0;width:fit-content;
   border:1px solid var(--line);border-radius:4px;overflow:hidden;background:#0e1116}
 .stepper button{border:0;border-radius:0;background:transparent;padding:5px 11px}
@@ -209,6 +216,14 @@ label.chk input{margin:0}
       </button>
     </div>
     <div class="body">
+      <div style="margin-bottom:16px">
+        <span style="display:block;color:var(--dim);font-size:11px;margin-bottom:6px">出口来源</span>
+        <div class="seg" id="pvseg">
+          <button data-pv="">VPN Gate</button>
+          <button data-pv="psiphon">Psiphon</button>
+        </div>
+        <div class="hint" id="pvhint"></div>
+      </div>
       <label class="f">
         <span>地区</span>
         <input type="search" id="rgfilter" placeholder="筛选地区">
@@ -248,7 +263,7 @@ label.chk input{margin:0}
       </button>
     </div>
     <div class="body">
-      <div class="hint" style="margin-bottom:8px">这个端口同时支持 SOCKS5 和 HTTP 代理，两种地址都能用：</div>
+      <div class="hint" style="margin-bottom:8px">这个端口同时支持 SOCKS5 和 HTTP 代理，两种地址都能用<span id="crnote"></span>：</div>
       <div class="share" id="crurl"></div>
       <div class="share" id="crurlhttp"></div>
       <div class="credrow">
@@ -407,19 +422,21 @@ function renderExits(){
       ? '<div class="errline" title="' + esc(e.err) + '">' + esc(e.err) + '</div>' : '';
     // country 后端已经给成"国旗 中文"，再拼国家码就重复了
     const place = esc(e.country || e.region || '—');
+    const psi = e.provider === 'psiphon';
+    const src = psi ? '<span class="tag" title="Psiphon 出口：服务器由 Psiphon 自动挑，IP 可能随重连变化，只转 TCP">Psiphon</span>' : '';
     const url = socksURL(credHost(e), e.port, e.socks_user, e.socks_pass);
     return '<div class="exit">'
       + '<div class="row">'
       +   '<span class="dot ' + e.status + '" title="' + (STATUS[e.status] || e.status) + '"></span>'
       +   '<span class="ip">' + esc(label) + '</span>'
-      +   '<span class="meta">' + place + ' · ' + esc(e.host) + '</span>'
+      +   '<span class="meta">' + src + place + (psi ? '' : ' · ' + esc(e.host)) + '</span>'
       +   '<span class="socks">'
       +     '<button data-cred="' + e.slot + '" title="代理访问凭据（改口令）">' + ICON.lock + ':' + e.port + '</button>'
       +     '<span class="addr" title="' + esc(url) + '">' + esc(url) + '</span>'
       +     '<button class="icon" data-copy="' + esc(url) + '" title="复制 SOCKS5 地址（同一端口也支持 HTTP 代理）">' + ICON.copy + '</button>'
       +   '</span>'
       +   '<span class="acts">'
-      +     '<button class="icon" data-swap="' + e.slot + '" title="换一个节点">' + ICON.redo + '</button>'
+      +     '<button class="icon" data-swap="' + e.slot + '" title="' + (psi ? '换一个出口 IP（让 Psiphon 重新挑服务器）' : '换一个节点') + '">' + ICON.redo + '</button>'
       +     '<button class="icon" data-stop="' + e.slot + '" title="停止这个出口">' + ICON.stop + '</button>'
       +   '</span>'
       + '</div>' + err + '</div>';
@@ -460,7 +477,13 @@ async function poll(){
 }
 
 // ---- 新建向导 ----
-let regions = [], region = '';
+// provider 为空是 VPN Gate，'psiphon' 是 Psiphon。两边的地区清单和"可用数"含义不同：
+// VPN Gate 是空闲节点数，Psiphon 不挑节点、同地区开几条都行，可用数就是剩余槽位。
+let regions = [], region = '', provider = '';
+const PVHINT = {
+  '': 'VPN Gate 志愿者节点，一条出口钉一个节点，支持 UDP。',
+  psiphon: 'Psiphon 机房出口：服务器由 Psiphon 在地区内自动挑，IP 可能随重连变化；只转 TCP，域名在远端解析。首次使用会下载 psiphon-tunnel-core（仅 x86_64）。'
+};
 
 function openModal(id){ $('#' + id).classList.add('open'); }
 function closeModal(id){ $('#' + id).classList.remove('open'); }
@@ -481,18 +504,27 @@ function renderRegions(){
   const kw = $('#rgfilter').value.trim().toLowerCase();
   const list = regions.filter(r => !kw
     || r.code.toLowerCase().includes(kw) || r.name.toLowerCase().includes(kw));
+  const psi = provider === 'psiphon';
+  document.querySelectorAll('#pvseg [data-pv]').forEach(b =>
+    b.classList.toggle('sel', b.dataset.pv === provider));
+  $('#pvhint').textContent = PVHINT[provider] || '';
   $('#regions').innerHTML = ['<button class="rg' + (region === '' ? ' sel' : '')
-      + '" data-rg=""><b>不限地区</b><em>速度优先</em></button>',
+      + '" data-rg=""><b>不限地区</b><em>' + (psi ? '由 Psiphon 挑最快的' : '速度优先') + '</em></button>',
     '<button class="rg' + (region === '*' ? ' sel' : '')
       + '" data-rg="*"><b>每个国家</b><em>' + regions.length + ' 个国家各来几个</em></button>']
     .concat(list.map(r => '<button class="rg' + (region === r.code ? ' sel' : '')
       + '" data-rg="' + esc(r.code) + '"><b>' + esc(r.name || r.code) + '</b>'
-      + '<em>' + r.available + ' 个空闲 · ' + r.best_speed_mbps.toFixed(0) + ' Mbps</em></button>'))
+      + '<em>' + (psi ? esc(r.code) + ' · 按需连接'
+        : r.available + ' 个空闲 · ' + r.best_speed_mbps.toFixed(0) + ' Mbps') + '</em></button>'))
     .join('');
   updateAvail();
 }
 
+// Psiphon 每个地区的 available 都是剩余槽位，不能按地区相加
+function roomOf(){ return regions.length ? regions[0].available : 0; }
+
 function availOf(code){
+  if(provider === 'psiphon') return roomOf();
   if(code === '') return regions.reduce((a, r) => a + r.available, 0);
   if(code === '*') return regions.reduce((a, r) => a + r.available, 0);
   const r = regions.find(x => x.code === code);
@@ -515,6 +547,13 @@ function updateAvail(){
     return;
   }
   const avail = availOf(region);
+  if(provider === 'psiphon'){
+    hint.textContent = avail ? '还能开 ' + avail + ' 条' : '槽位已满，先停几个出口';
+    hint.className = 'hint' + (want > avail ? ' bad' : '');
+    if(want > avail && avail) hint.textContent = '只剩 ' + avail + ' 个槽位，将全部使用';
+    $('#go').disabled = !avail;
+    return;
+  }
   hint.textContent = avail ? '可用 ' + avail + ' 个节点' : '这个地区没有空闲节点';
   hint.className = 'hint' + (want > avail ? ' bad' : '');
   if(want > avail && avail) hint.textContent = '只剩 ' + avail + ' 个，将全部使用';
@@ -523,7 +562,7 @@ function updateAvail(){
 
 async function loadWizard(){
   try{
-    regions = await api('/api/regions') || [];
+    regions = await api('/api/regions' + (provider ? '?provider=' + provider : '')) || [];
     renderRegions();
   }catch(e){ toast('读取地区失败: ' + e.message, true); }
 }
@@ -531,6 +570,15 @@ async function loadWizard(){
 document.addEventListener('click', e => {
   if(e.target.closest('#newexit') || e.target.closest('#newexit2')){
     openModal('wizard');
+    loadWizard();
+  }
+  const pv = e.target.closest('[data-pv]');
+  if(pv && pv.dataset.pv !== provider){
+    // 换来源后地区清单完全不同，选中的地区作废
+    provider = pv.dataset.pv;
+    region = '';
+    regions = [];
+    renderRegions();
     loadWizard();
   }
   const rg = e.target.closest('[data-rg]');
@@ -557,6 +605,7 @@ $('#go').onclick = async e => {
   e.target.disabled = true;
   try{
     await api('/api/provision?count=' + want
+      + (provider ? '&provider=' + provider : '')
       + (region === '*' ? '&every=1' : '&region=' + encodeURIComponent(region)), {method:'POST'});
     closeModal('wizard');
     poll();
@@ -643,6 +692,7 @@ function openCred(slot){
   const e = view.exits.find(x => x.slot === slot);
   if(!e){ toast('这个出口不在了', true); return; }
   curCred = {slot: slot, port: e.port, host: credHost(e)};
+  $('#crnote').textContent = e.provider === 'psiphon' ? '（Psiphon 出口只转 TCP，SOCKS5 的 UDP 不可用）' : '';
   $('#crtitle').textContent = (e.country || e.region) + ' · :' + e.port;
   $('#cruser').value = e.socks_user || '';
   $('#crpass').value = e.socks_pass || '';

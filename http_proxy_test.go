@@ -30,7 +30,7 @@ func TestHTTPProxyConnectTunnels(t *testing.T) {
 	}
 	client, server := net.Pipe()
 	defer client.Close()
-	go serveMixed(server, cred, dial)
+	go serveMixed(server, cred, dial, true)
 	_ = client.SetDeadline(time.Now().Add(3 * time.Second))
 
 	go func() {
@@ -76,7 +76,7 @@ func TestHTTPProxyRejectsWithoutAuth(t *testing.T) {
 	}
 	client, server := net.Pipe()
 	defer client.Close()
-	go serveMixed(server, cred, dial)
+	go serveMixed(server, cred, dial, true)
 	_ = client.SetDeadline(time.Now().Add(3 * time.Second))
 
 	go func() {
@@ -110,7 +110,7 @@ func TestHTTPProxyPlainRequestRewritten(t *testing.T) {
 	}
 	client, server := net.Pipe()
 	defer client.Close()
-	go serveMixed(server, cred, dial)
+	go serveMixed(server, cred, dial, true)
 	_ = client.SetDeadline(time.Now().Add(3 * time.Second))
 
 	go func() {
@@ -174,7 +174,7 @@ func TestServeMixedRejectsUnknownProtocol(t *testing.T) {
 	defer client.Close()
 	go serveMixed(server, &SocksCred{User: "u", Pass: "p"}, func(network, addr string) (net.Conn, error) {
 		return nil, io.EOF
-	})
+	}, true)
 	_ = client.SetDeadline(time.Now().Add(3 * time.Second))
 
 	go func() { _, _ = client.Write([]byte{0x00, 0x01, 0x02}) }()

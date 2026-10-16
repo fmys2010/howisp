@@ -115,6 +115,9 @@ func (m *Manager) Start(node Node) (*Tunnel, error) {
 		status: "starting",
 		since:  time.Now(),
 		cred:   cred,
+		// 新开的 Psiphon 出口从空 datastore 起步：槽位目录可能是别的出口留下的，
+		// 里面记着人家的服务器
+		psiFresh: node.isPsiphon(),
 	}
 	m.tunnels[slot] = t
 	m.mu.Unlock()
@@ -162,15 +165,23 @@ func (m *Manager) bringUpPersist(t *Tunnel, persist bool) {
 
 		// 把最后一次真实失败原因带上：只报"暂无可用节点"用户没法判断
 		// 是自己缺依赖、节点全挂还是网络不通。
-		t.setState("starting", fmt.Sprintf("暂无可用节点，%.0f 秒后重试（最后错误：%s）",
-			backoff.Seconds(), shortErr(t.errOf())))
-		log.Printf("隧道 %d 一轮候选均失败，%.0f 秒后刷新节点重试", t.Slot, backoff.Seconds())
+		psiphon := t.isPsiphon()
+		what := "暂无可用节点"
+		if psiphon {
+			what = "Psiphon 没连上"
+		}
+		t.setState("starting", fmt.Sprintf("%s，%.0f 秒后重试（最后错误：%s）",
+			what, backoff.Seconds(), shortErr(t.errOf())))
+		log.Printf("隧道 %d %s，%.0f 秒后重试", t.Slot, what, backoff.Seconds())
 		time.Sleep(backoff)
 		if !m.tunnelActive(t) {
 			return
 		}
-		if _, err := m.RefreshNodes(); err != nil {
-			log.Printf("重试前刷新节点列表失败: %v", err)
+		// VPN Gate 的死节点多，重试前刷新一下列表；Psiphon 的服务器它自己会拉
+		if !psiphon {
+			if _, err := m.RefreshNodes(); err != nil {
+				log.Printf("重试前刷新节点列表失败: %v", err)
+			}
 		}
 		if backoff < reconnectBackoffMax {
 			backoff *= 2
@@ -187,6 +198,9 @@ func (m *Manager) bringUpPersist(t *Tunnel, persist bool) {
 // 早先版本把真实错误丢掉、只显示"已换到第 N 个候选节点"，出问题时
 // 从界面到日志都查不出原因。
 func (m *Manager) tryCandidates(t *Tunnel) bool {
+	if t.isPsiphon() {
+		return m.tryPsiphon(t)
+	}
 	candidates := m.candidatesFor(t)
 	for i, node := range candidates {
 		if !m.tunnelActive(t) {
@@ -216,6 +230,58 @@ func (m *Manager) tryCandidates(t *Tunnel) bool {
 		t.teardownNetns()
 	}
 	return false
+}
+
+// tryPsiphon 拉起一条 Psiphon 出口，成功返回 true。
+//
+// 这里没有"候选节点"可轮：服务器由 psiphon 在地区内自己挑。
+// 唯一要管的是换节点——用户要的是一个没用过的 IP，而 psiphon 偏偏会优先重连
+// 上次那台服务器，所以分到换过的 IP 就清掉 datastore 再挑，最多 psiphonSwapTries 次，
+// 还是撞上就先用着，总比一直连不上强。
+func (m *Manager) tryPsiphon(t *Tunnel) bool {
+	for attempt := 1; ; attempt++ {
+		if !m.tunnelActive(t) {
+			return false
+		}
+		if err := m.tryPsiphonOnce(t); err != nil {
+			log.Printf("隧道 %d 连接 Psiphon（%s）失败: %v", t.Slot, psiphonRegionText(t.nodeOf()), err)
+			t.setError(shortErr(err.Error()))
+			t.killPsiphon()
+			return false
+		}
+		ip := t.exitIPOf()
+		if attempt < psiphonSwapTries && t.swapAvoid()[ip] {
+			log.Printf("隧道 %d 的 Psiphon 又分到了换过的 IP %s，重新挑服务器", t.Slot, ip)
+			t.killPsiphon()
+			t.setExitIP("")
+			t.markFresh()
+			t.setState("starting", "又分到了换过的 IP "+ip+"，重新挑服务器")
+			continue
+		}
+		t.markUp()
+		if serr := m.saveState(); serr != nil {
+			log.Printf("保存状态失败: %v", serr)
+		}
+		return true
+	}
+}
+
+// tryPsiphonOnce 起一次 psiphon，连通后建监听、探出口 IP。
+func (m *Manager) tryPsiphonOnce(t *Tunnel) error {
+	if err := t.startPsiphon(m.workDir); err != nil {
+		return err
+	}
+	if !t.serving() {
+		if err := t.serve(); err != nil {
+			return err
+		}
+	}
+	ip, err := t.probeExitIP()
+	if err != nil {
+		return err
+	}
+	t.setExitIP(ip)
+	return nil
 }
 
 // tunnelActive 判断这条隧道是否还归管理器所有且未被用户停掉。
@@ -300,17 +366,26 @@ func (m *Manager) candidatesFor(t *Tunnel) []Node {
 }
 
 // Stop 停掉一条隧道并释放槽位。
+//
+// 先收拾干净再让出槽位：Psiphon 出口的工作目录按槽位命名，
+// 让出得早了，紧接着新建的出口拿到同一个槽位，会被这边的删目录误伤。
 func (m *Manager) Stop(slot int) error {
-	m.mu.Lock()
+	m.mu.RLock()
 	t, ok := m.tunnels[slot]
-	if ok {
-		delete(m.tunnels, slot)
-	}
-	m.mu.Unlock()
+	m.mu.RUnlock()
 	if !ok {
 		return fmt.Errorf("槽位 %d 没有运行中的隧道", slot)
 	}
 	t.stop()
+	if t.isPsiphon() {
+		// 用户主动停掉的，datastore 留着也没人认领
+		_ = os.RemoveAll(t.psiphonDir(m.workDir))
+	}
+	m.mu.Lock()
+	if m.tunnels[slot] == t {
+		delete(m.tunnels, slot)
+	}
+	m.mu.Unlock()
 	if err := m.saveState(); err != nil {
 		log.Printf("保存状态失败: %v", err)
 	}
@@ -334,6 +409,15 @@ func (m *Manager) Swap(slot int) error {
 	}
 	if t.statusOf() == "starting" {
 		return fmt.Errorf("这个出口正在连接中，稍等一下")
+	}
+
+	if t.isPsiphon() {
+		// Psiphon 没有节点可挑，换节点就是让它忘掉当前服务器重新挑；
+		// 当前 IP 记进历史，重新挑出来还是它的话 tryPsiphon 会再换
+		t.rememberSwap(t.exitIPOf())
+		t.markFresh()
+		m.reconnect(t)
+		return nil
 	}
 
 	node, err := m.pickSwapTarget(t)

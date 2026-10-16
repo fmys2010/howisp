@@ -20,7 +20,9 @@ type SocksCred struct {
 	Pass string `json:"pass"`
 }
 
-// Tunnel 是一条运行中的隧道：一个 netns + 一个 openvpn 进程 + 一个本地 SOCKS5 端口。
+// Tunnel 是一条运行中的隧道，对外是一个本地混合端口。VPN Gate 出口背后是
+// 一个 netns + 一个 openvpn 进程；Psiphon 出口背后是一个 psiphon-tunnel-core 进程
+// （见 psiphon.go）。
 //
 // 运行态字段全部由 mu 保护。健康检查、HTTP 接口、拉起与重连 goroutine 会并发
 // 读写同一条隧道，早先版本只在少数字段上加锁，go test -race 能稳定复现竞争。
@@ -38,6 +40,9 @@ type Tunnel struct {
 	swapped  []string // 换节点用过的 hostname，按时间先后排
 	listener net.Listener
 	ovpn     *exec.Cmd
+	psi      *exec.Cmd // Psiphon 出口的 psiphon-tunnel-core 进程
+	psiPort  int       // psiphon 的本地 SOCKS 端口（只在 127.0.0.1 上），重启后会变
+	psiFresh bool      // 下次启动前清空 psiphon 的 datastore，换节点用
 }
 
 // TunnelView 是隧道对外的只读快照。JSON 字段与旧版保持一致，
@@ -93,6 +98,9 @@ func (t *Tunnel) errOf() string {
 	defer t.mu.Unlock()
 	return t.errMsg
 }
+
+// isPsiphon 判断这是不是 Psiphon 出口。出口的来源在创建时定下，换节点也不会变。
+func (t *Tunnel) isPsiphon() bool { return t.nodeOf().isPsiphon() }
 
 func (t *Tunnel) setNode(n Node) {
 	t.mu.Lock()
@@ -429,7 +437,7 @@ func (t *Tunnel) serve() error {
 	t.listener = ln
 	t.mu.Unlock()
 
-	dial := dialerInNetns(t.nsName())
+	dial, udp := t.outbound()
 	go func() {
 		for {
 			conn, err := ln.Accept()
@@ -439,10 +447,19 @@ func (t *Tunnel) serve() error {
 			// 每次连接现取凭据：改口令后不必重建监听，新连接立刻按新凭据校验
 			cred := t.credential()
 			// 混合端口：同一个端口既收 SOCKS5 也收 HTTP 代理
-			go serveMixed(conn, &cred, dial)
+			go serveMixed(conn, &cred, dial, udp)
 		}
 	}()
 	return nil
+}
+
+// outbound 返回这条隧道的出站方式，以及它能不能转 UDP。
+// VPN Gate 在隧道的 netns 里直接建连；Psiphon 经它的本地 SOCKS 端口出去，只转 TCP。
+func (t *Tunnel) outbound() (dialFunc, bool) {
+	if t.isPsiphon() {
+		return t.psiphonDial, false
+	}
+	return dialerInNetns(t.nsName()), true
 }
 
 // credential 取一份凭据副本，避免读写并发。
@@ -462,6 +479,9 @@ func (t *Tunnel) setCredential(c SocksCred) {
 
 // probeExitIP 通过隧道查询出口 IP，用于确认这条隧道确实换了 IP。
 func (t *Tunnel) probeExitIP() (string, error) {
+	if t.isPsiphon() {
+		return probeExitIPVia(t.psiphonDial, 15*time.Second)
+	}
 	out, err := cmdOutput(exec.Command("ip", "netns", "exec", t.nsName(),
 		"curl", "-s", "--max-time", "15", "http://api.ipify.org"))
 	if err != nil {
@@ -484,6 +504,19 @@ func (t *Tunnel) killOpenVPN() {
 	t.mu.Unlock()
 }
 
+// teardown 结束出口进程并释放它占的系统资源。
+//
+// 先杀进程再拆 netns。顺序反了的话，openvpn 会继续活在已被删除的
+// 命名空间里——只要有进程引用，那个 netns 就不会真正释放，
+// 变成谁也看不见、谁也管不着的僵尸。Psiphon 出口没有 netns，杀进程就够了。
+func (t *Tunnel) teardown() {
+	t.killOpenVPN()
+	t.killPsiphon()
+	if !t.isPsiphon() {
+		t.teardownNetns()
+	}
+}
+
 // stop 停止这条隧道并清理它占用的所有资源。
 func (t *Tunnel) stop() {
 	t.mu.Lock()
@@ -491,11 +524,7 @@ func (t *Tunnel) stop() {
 		t.listener.Close()
 		t.listener = nil
 	}
-	if t.ovpn != nil && t.ovpn.Process != nil {
-		_ = t.ovpn.Process.Kill()
-		t.ovpn = nil
-	}
 	t.status = "stopped"
 	t.mu.Unlock()
-	t.teardownNetns()
+	t.teardown()
 }

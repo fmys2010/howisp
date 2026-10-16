@@ -43,7 +43,7 @@ func runServeSocks(cred *SocksCred) (net.Conn, func()) {
 	// dial 永不被调用（测试只到认证阶段），给个占位实现
 	dial := func(network, addr string) (net.Conn, error) { return nil, io.EOF }
 	// 走混合端口入口：顺带验证首字节分流不会把 SOCKS5 认错
-	go serveMixed(sConn, cred, dial)
+	go serveMixed(sConn, cred, dial, true)
 	return cConn, func() { cConn.Close() }
 }
 

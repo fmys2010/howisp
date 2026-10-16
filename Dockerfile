@@ -3,6 +3,10 @@
 # 这个镜像不是普通的应用容器：fanout 要建 network namespace、改 iptables、
 # 在 netns 里跑 openvpn，所以运行时必须是 host 网络 + NET_ADMIN/SYS_ADMIN，
 # 并且能看到 /dev/net/tun。具体跑法见 README 与 docker-compose.yml。
+#
+# Psiphon 出口用的 psiphon-tunnel-core 不打进镜像：第一次开 Psiphon 出口时
+# fanout 自己下载（钉死版本、校验 sha256）到 /var/lib/fanout/bin，跟着卷走，
+# 版本只在 psiphon.go 一处维护。官方只发 x86_64，arm64 镜像里开不了 Psiphon 出口。
 
 # ---------- 构建阶段 ----------
 FROM golang:1.24-bookworm AS build

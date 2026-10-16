@@ -6,6 +6,9 @@
 每个端口都是**混合端口**，SOCKS5 和 HTTP 代理两种协议都收，客户端连哪个端口，
 就从哪个国家出去。
 
+除了 VPN Gate，也可以开 [Psiphon](https://psiphon.ca/) 出口，见下面的
+[Psiphon 出口](#psiphon-出口)一节。
+
 ![主界面](https://images.joeyblog.net/2026/7/27/fanout-dashboard.png)
 
 四条隧道跑在一台机器上，四个端口对应四个国家的出口，母机自己的 IP 不受影响：
@@ -136,6 +139,50 @@ VPN Gate 的清单里混着一批它自己的机房服务器（`public-vpn-*` �
 
 开关只管新挑的节点，已经跑着的出口不会因为改设置被换掉。
 
+### Psiphon 出口
+
+新建出口时把「出口来源」切到 **Psiphon**，再选地区和数量。地区清单先用内置的
+28 个，任意一条 Psiphon 出口连上后换成 Psiphon 实时报上来的可用地区。
+「不限地区」交给 Psiphon 挑最快的服务器，「每个国家」每个地区各开几条。
+
+原理和 VPN Gate 出口不一样：每条 Psiphon 出口是一个独立的 `psiphon-tunnel-core`
+进程，只在 `127.0.0.1` 上开一个本地 SOCKS 端口，不建 netns、不改路由。
+母机上的混合端口收到连接后，转手经这个本地端口出去：
+
+```
+客户端 ──> 母机混合端口 :随机端口 ──> 127.0.0.1:psiphon 本地端口 ──> Psiphon 服务器
+```
+
+端口、口令、换节点、停止、重启后恢复都和 VPN Gate 出口一样用，有几点不同：
+
+- **只转 TCP**。Psiphon 的本地代理不支持 UDP，SOCKS5 的 UDP ASSOCIATE 会直接回
+  「命令不支持」，客户端会退回 TCP。要 UDP（DNS/QUIC 走隧道）请用 VPN Gate 出口。
+- **出口 IP 可能变**。服务器由 Psiphon 在地区内自己挑，掉线后它会自动重连，
+  可能换到同地区另一台。健康检查只看能不能出网，IP 变了就更新界面上的显示。
+  重启 fanout 时会沿用这条出口自己的 datastore，Psiphon 会优先连回上次那台。
+- **换节点**会清掉这条出口的 datastore，让 Psiphon 重新挑服务器；
+  又分到换过的 IP 就再挑，最多 3 次。
+- **是机房 IP**，不是家宽。「只用家宽节点」只管 VPN Gate，不影响 Psiphon。
+- 域名交给 Psiphon 服务器解析，母机上不发 DNS 查询。
+- 每条出口一个进程，内存按每条几十 MB 估算。
+
+`psiphon-tunnel-core` 在第一次开 Psiphon 出口时自动下载：取自
+[Psiphon-Labs/psiphon-tunnel-core-binaries](https://github.com/Psiphon-Labs/psiphon-tunnel-core-binaries)
+钉死的提交，校验 SHA256 后放在 `/var/lib/fanout/bin/`，Docker 下随卷保留。
+每条出口的配置、日志、通知和 datastore 在 `/var/lib/fanout/psiphon/<槽位>/`，
+连不上时先看那里的 `notices.jsonl`。
+
+官方只发布 **x86_64** 的 Linux 客户端。arm64 机器要用的话，自己编译
+psiphon-tunnel-core 的 ConsoleClient，再用环境变量指过去：
+
+```bash
+# systemd：systemctl edit fanout，加上
+[Service]
+Environment=FANOUT_PSIPHON_BIN=/usr/local/bin/psiphon-tunnel-core
+
+# Docker：docker run 加 -e FANOUT_PSIPHON_BIN=...，并把文件挂进容器
+```
+
 ## 运维
 
 装完后敲 `f` 打开管理菜单：启停、看日志、查隧道、改端口/口令/访问路径、卸载。
@@ -186,6 +233,8 @@ netns 仍能经母机 NAT 出网，只看通不通会漏判。连续两次不符
 - 管理界面只有随机路径 + 口令登录，没有 HTTPS。放公网建议前面套一层反代。
 - 换节点会避开这条出口之前用过的节点（最多记 16 个），同地区都换过一轮后
   从头开始。一个地区只有一个可用节点时换不动，界面会直接说明原因。
+- Psiphon 出口只转 TCP、出口 IP 不固定，官方客户端只有 x86_64，详见
+  [Psiphon 出口](#psiphon-出口)。
 
 ## 许可
 
@@ -193,7 +242,8 @@ netns 仍能经母机 NAT 出网，只看通不通会漏判。连续两次不符
 
 节点来自 [VPN Gate](https://www.vpngate.net/)（筑波大学的学术实验项目），
 本工具只是调用其公开的节点列表并用官方 openvpn 客户端连接，不修改也不代理其服务。
-使用时请遵守 VPN Gate 的条款和你所在地的法律。
+Psiphon 出口使用 Psiphon 官方发布的 psiphon-tunnel-core 客户端。
+使用时请遵守 VPN Gate、Psiphon 的条款和你所在地的法律。
 
 ## 交流
 

@@ -48,6 +48,9 @@ func (m *Manager) WatchHealth() {
 // openvpn 死掉后照样能出网，只是出口变回了母机 IP。
 // 所以要比对出口 IP 是否仍是建立隧道时拿到的那个。
 func (m *Manager) tunnelHealthy(t *Tunnel) bool {
+	if t.isPsiphon() {
+		return m.psiphonHealthy(t)
+	}
 	out, err := cmdOutput(exec.Command("ip", "netns", "exec", t.nsName(),
 		"curl", "-s", "--max-time", strconv.Itoa(int(healthTimeout.Seconds())),
 		"http://api.ipify.org"))
@@ -62,17 +65,32 @@ func (m *Manager) tunnelHealthy(t *Tunnel) bool {
 	return got == t.exitIPOf()
 }
 
+// psiphonHealthy 判断 Psiphon 出口还通不通。
+//
+// 和 VPN Gate 不一样，出口 IP 变了不算掉线：psiphon 自己会在地区内换服务器重连，
+// IP 跟着变是正常的；而它死了本地 SOCKS 端口就没了，不存在悄悄退回母机 IP 的情况。
+// 所以这里只看能不能经它出网，IP 变了就更新显示。
+func (m *Manager) psiphonHealthy(t *Tunnel) bool {
+	t.trimPsiphonNotices(m.workDir)
+	ip, err := probeExitIPVia(t.psiphonDial, healthTimeout)
+	if err != nil {
+		return false
+	}
+	if old := t.exitIPOf(); ip != old {
+		log.Printf("隧道 %d 的 Psiphon 换了服务器，出口 IP %s -> %s", t.Slot, old, ip)
+		t.setExitIP(ip)
+	}
+	return true
+}
+
 // reconnect 就地把一条隧道换到别的节点上，保持槽位与端口不变，
 // 这样已经分发出去的客户端配置仍然可用。
 func (m *Manager) reconnect(t *Tunnel) {
 	t.setState("starting", "正在换节点重连")
 	t.setExitIP("")
 
-	// 先杀进程再拆 netns。顺序反了的话，openvpn 会继续活在已被删除的
-	// 命名空间里——只要有进程引用，那个 netns 就不会真正释放，
-	// 变成谁也看不见、谁也管不着的僵尸。
-	t.killOpenVPN()
-	t.teardownNetns()
+	// 先杀进程再拆 netns，顺序见 teardown 的说明
+	t.teardown()
 
 	// 重连是持久化行为：一轮候选全失败不放弃，退避后刷新节点列表再来
 	go m.bringUpPersist(t, true)
