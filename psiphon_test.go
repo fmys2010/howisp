@@ -26,6 +26,8 @@ func TestParsePsiphonNotices(t *testing.T) {
 		long,
 		`{"noticeType":"Tunnels","data":{"count":1}}`,
 		`{"noticeType":"Error","data":{"message":"dial failed"}}`,
+		// 连上后必报的 DSL 拉取失败不算原因，不能盖掉前面真正的错误
+		`{"noticeType":"Error","data":{"message":"tunneled DSL fetch failed: psiphon.runTunneledDSLFetcher#153: missing public key"}}`,
 		`{"noticeType":"AvailableEgressRegions","data":{"regions":["US","JP"]}}`,
 		`{"noticeType":"Tunnels","data":{"count":0}}`,
 		`{"noticeType":"Tunnels","data":{"count":1}}`,

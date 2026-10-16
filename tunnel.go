@@ -29,20 +29,21 @@ type SocksCred struct {
 type Tunnel struct {
 	Slot int `json:"slot"`
 
-	mu       sync.Mutex
-	port     int
-	node     Node
-	status   string // starting | up | failed | stopped
-	exitIP   string
-	errMsg   string
-	since    time.Time
-	cred     SocksCred
-	swapped  []string // 换节点用过的 hostname，按时间先后排
-	listener net.Listener
-	ovpn     *exec.Cmd
-	psi      *exec.Cmd // Psiphon 出口的 psiphon-tunnel-core 进程
-	psiPort  int       // psiphon 的本地 SOCKS 端口（只在 127.0.0.1 上），重启后会变
-	psiFresh bool      // 下次启动前清空 psiphon 的 datastore，换节点用
+	mu        sync.Mutex
+	port      int
+	node      Node
+	status    string // starting | up | failed | stopped
+	exitIP    string
+	errMsg    string
+	since     time.Time
+	cred      SocksCred
+	swapped   []string // 换节点用过的 hostname，按时间先后排
+	listener  net.Listener
+	ovpn      *exec.Cmd
+	psi       *exec.Cmd     // Psiphon 出口的 psiphon-tunnel-core 进程
+	psiExited chan struct{} // psi 退出（已被 Wait 回收）时关闭
+	psiPort   int           // psiphon 的本地 SOCKS 端口（只在 127.0.0.1 上），重启后会变
+	psiFresh  bool          // 下次启动前清空 psiphon 的 datastore，换节点用
 }
 
 // TunnelView 是隧道对外的只读快照。JSON 字段与旧版保持一致，

@@ -339,9 +339,19 @@ func (t *Tunnel) startPsiphon(workDir string) error {
 	if err := cmdStart(cmd); err != nil {
 		return fmt.Errorf("启动 psiphon 失败: %w", err)
 	}
+	// 进程退出通过 channel 通知，不去读 cmd.ProcessState（那是 Wait 在别的 goroutine 里写的）。
+	// exited 给 killPsiphon 用：杀完要等它真退出、放掉 datastore 的锁
+	done := make(chan error, 1)
+	exited := make(chan struct{})
+	go func() {
+		done <- cmd.Wait()
+		close(exited)
+	}()
+
 	t.mu.Lock()
 	stopped := t.status == "stopped"
 	t.psi = cmd
+	t.psiExited = exited
 	t.psiPort = 0
 	t.mu.Unlock()
 	if stopped {
@@ -349,9 +359,6 @@ func (t *Tunnel) startPsiphon(workDir string) error {
 		t.killPsiphon()
 		return fmt.Errorf("出口已停止")
 	}
-
-	done := make(chan error, 1)
-	go func() { done <- cmd.Wait() }()
 
 	deadline := time.Now().Add(psiphonReadyTimeout)
 	for time.Now().Before(deadline) {
@@ -392,15 +399,27 @@ func (t *Tunnel) startPsiphon(workDir string) error {
 	return fmt.Errorf("%.0f 秒内没连上 Psiphon，详见 %s", psiphonReadyTimeout.Seconds(), notices)
 }
 
-// killPsiphon 结束这条出口的 psiphon 进程。
+// killPsiphon 结束这条出口的 psiphon 进程，并等它真的退出。
+//
+// 不等的话，换节点、重连紧接着在同一个目录上起新进程时，旧进程可能还没走完、
+// 还锁着 datastore——真机上就撞到过新进程起来时旧的那个还在。
+// 等到 Wait 返回也顺带把它回收了，fanout 自己退出时不会留下僵尸。
 func (t *Tunnel) killPsiphon() {
 	t.mu.Lock()
-	if t.psi != nil && t.psi.Process != nil {
-		_ = t.psi.Process.Kill()
-	}
-	t.psi = nil
-	t.psiPort = 0
+	cmd, exited := t.psi, t.psiExited
+	t.psi, t.psiExited, t.psiPort = nil, nil, 0
 	t.mu.Unlock()
+	if cmd == nil || cmd.Process == nil {
+		return
+	}
+	_ = cmd.Process.Kill()
+	if exited != nil {
+		select {
+		case <-exited:
+		case <-time.After(5 * time.Second):
+			log.Printf("隧道 %d 的 psiphon 进程 %d 5 秒内没退出", t.Slot, cmd.Process.Pid)
+		}
+	}
 }
 
 // markFresh 让下次启动前清空 datastore，psiphon 就会重新挑服务器。
@@ -432,12 +451,27 @@ func (t *Tunnel) trimPsiphonNotices(workDir string) {
 // 按命令行里的 -dataRootDirectory 认人，只动用着这个目录的，
 // 不会误伤同机上别的程序（包括 Linphon 起的 psiphon）。
 func killStalePsiphon(dataDir string) {
+	victims := psiphonPidsUsing(dataDir)
+	for _, pid := range victims {
+		log.Printf("结束残留的 psiphon 进程 %d（%s）", pid, dataDir)
+		_ = syscall.Kill(pid, syscall.SIGKILL)
+	}
+	// 等它们真的退出、放掉文件锁。按命令行重新找一遍而不是 kill(pid, 0)：
+	// 没人回收的僵尸对 kill(pid, 0) 也算活着，但它的命令行已经读不出来了
+	for i := 0; i < 30 && len(victims) > 0; i++ {
+		time.Sleep(100 * time.Millisecond)
+		victims = psiphonPidsUsing(dataDir)
+	}
+}
+
+// psiphonPidsUsing 找出命令行里 -dataRootDirectory 是 dataDir 的进程。
+func psiphonPidsUsing(dataDir string) []int {
 	entries, err := os.ReadDir("/proc")
 	if err != nil {
-		return
+		return nil
 	}
 	self := os.Getpid()
-	var victims []int
+	var out []int
 	for _, e := range entries {
 		pid, err := strconv.Atoi(e.Name())
 		if err != nil || pid == self {
@@ -448,26 +482,10 @@ func killStalePsiphon(dataDir string) {
 			continue
 		}
 		if argvHasFlagValue(strings.Split(string(bytes.TrimRight(raw, "\x00")), "\x00"), "-dataRootDirectory", dataDir) {
-			victims = append(victims, pid)
+			out = append(out, pid)
 		}
 	}
-	for _, pid := range victims {
-		log.Printf("结束残留的 psiphon 进程 %d（%s）", pid, dataDir)
-		_ = syscall.Kill(pid, syscall.SIGKILL)
-	}
-	// 等它们真的退出、放掉文件锁
-	for i := 0; i < 30 && len(victims) > 0; i++ {
-		alive := victims[:0]
-		for _, pid := range victims {
-			if syscall.Kill(pid, 0) == nil {
-				alive = append(alive, pid)
-			}
-		}
-		victims = alive
-		if len(victims) > 0 {
-			time.Sleep(100 * time.Millisecond)
-		}
-	}
+	return out
 }
 
 func argvHasFlagValue(argv []string, flag, value string) bool {
@@ -530,7 +548,11 @@ func parsePsiphonNotices(r io.Reader) psiphonStatus {
 		case "AvailableEgressRegions":
 			st.regions = n.Data.Regions
 		case "Error", "Alert", "Warning":
-			if msg := strings.TrimSpace(n.Data.Message); msg != "" {
+			msg := strings.TrimSpace(n.Data.Message)
+			// 连上之后 psiphon 会经隧道拉一次 DSL 服务器清单，公开配置里没有它要的签名公钥，
+			// 必报一条 "tunneled DSL fetch failed: ... missing public key"。不影响使用，
+			// 记下来的话以后真连不上时会拿它当原因，把人带偏
+			if msg != "" && !strings.Contains(msg, "DSL fetch failed") {
 				st.lastErr = msg
 			}
 		}
