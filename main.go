@@ -86,6 +86,7 @@ func main() {
 	}
 
 	go mgr.WatchHealth()
+	go mgr.WatchIPInfo()
 
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
@@ -111,6 +112,7 @@ func main() {
 	mux.HandleFunc("/api/provision", apiProvision(mgr))
 	mux.HandleFunc("/api/jobs", apiJobs(mgr))
 	mux.HandleFunc("/api/jobs/dismiss", apiJobDismiss(mgr))
+	mux.HandleFunc("/api/ipinfo/refresh", apiIPInfoRefresh(mgr))
 
 	auth, created, err := NewAuth(*workDir)
 	if err != nil {
@@ -427,6 +429,22 @@ func apiProvision(m *Manager) http.HandlerFunc {
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]string{"job": job.ID()})
+	}
+}
+
+// apiIPInfoRefresh 立刻重查一个出口的 IP 质量；slot=0 查母机。
+func apiIPInfoRefresh(m *Manager) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		slot, err := strconv.Atoi(r.URL.Query().Get("slot"))
+		if err != nil || slot < 0 {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "slot 参数无效"})
+			return
+		}
+		if err := m.RefreshIPInfo(slot); err != nil {
+			writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]string{"ok": "正在查询"})
 	}
 }
 
