@@ -3,7 +3,6 @@ package main
 import (
 	"net"
 	"net/http"
-	"os"
 	"strconv"
 	"testing"
 	"time"
@@ -40,53 +39,6 @@ func TestValidatePort(t *testing.T) {
 		if err := validatePort(p); err == nil {
 			t.Fatalf("端口 %d 应非法", p)
 		}
-	}
-}
-
-func TestSetBasePathValidatesAndPersists(t *testing.T) {
-	dir := t.TempDir()
-	if _, err := initBasePath(dir); err != nil {
-		t.Fatalf("initBasePath: %v", err)
-	}
-	bp, err := setBasePath("myPanel_1")
-	if err != nil {
-		t.Fatalf("setBasePath: %v", err)
-	}
-	if bp != "/myPanel_1" || currentBasePath() != "/myPanel_1" {
-		t.Fatalf("basePath 未生效: %q / %q", bp, currentBasePath())
-	}
-	if _, err := os.ReadFile(dir + "/basepath"); err != nil {
-		t.Fatalf("basepath 未落盘: %v", err)
-	}
-	if _, err := setBasePath("bad/slash"); err == nil {
-		t.Fatal("带非法字符的路径应被拒")
-	}
-	// 空串表示去掉前缀
-	if bp, err := setBasePath(""); err != nil || bp != "" {
-		t.Fatalf("空路径应清空前缀: %q %v", bp, err)
-	}
-}
-
-func TestAuthSetPassword(t *testing.T) {
-	dir := t.TempDir()
-	auth, _, err := NewAuth(dir)
-	if err != nil {
-		t.Fatalf("NewAuth: %v", err)
-	}
-	if err := auth.SetPassword("newsecret"); err != nil {
-		t.Fatalf("SetPassword: %v", err)
-	}
-	if !auth.check("newsecret") {
-		t.Fatal("新口令应校验通过")
-	}
-	if auth.check("wrong") {
-		t.Fatal("旧口令不应再通过")
-	}
-	if err := auth.SetPassword(""); err == nil {
-		t.Fatal("空口令应被拒")
-	}
-	if err := auth.SetPassword("ab"); err == nil {
-		t.Fatal("过短口令应被拒")
 	}
 }
 

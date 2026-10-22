@@ -12,8 +12,7 @@ import (
 )
 
 // WebSettings 是落盘的可改配置：管理界面的监听端口与地址，外加几个功能开关。
-// 界面改完即时生效。访问口令与访问路径各有专门的文件（password / basepath），
-// 不放这里，但都能在设置面板里改。
+// 界面改完即时生效。登录密钥单独放在 key 文件里（见 auth.go），不放这里。
 type WebSettings struct {
 	// Port 是管理界面监听端口。
 	Port int `json:"port"`

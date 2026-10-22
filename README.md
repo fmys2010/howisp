@@ -58,15 +58,22 @@ apk add bash curl
 bash <(curl -fsSL https://raw.githubusercontent.com/byJoey/fanout/main/install.sh)
 ```
 
-装完敲 `f` 打开管理菜单，也会打印管理界面地址、访问路径和口令：
+装完会打印一条登录链接，之后敲 `f info`（或 `f link`）随时再看：
 
 ```
-管理界面  http://<你的IP>:8899/gwPuWHvaNr/
-访问口令  f81120ac328d11c11b
+登录链接  http://<你的IP>:8899/?k=Zx9QpL2mVb7RkT4wYc8HnJ3sFd6GaE1u
 ```
 
-路径和口令都是随机生成的，分别存在 `/var/lib/fanout/basepath` 和
-`/var/lib/fanout/password`。路径不对一律返回 404，扫端口的看不到这里跑着什么。
+在浏览器里打开一次就记住登录：服务端发一个 30 天的 cookie，常用的设备会自动续期，
+重启、升级都不掉线。换设备就在那台设备上再打开一次链接。
+
+链接里的密钥是 192 位随机数，存在 `/var/lib/fanout/key`。没有它的请求一律返回 404，
+没有登录页、也没有表单可以爆破，扫端口的看不到这里跑着什么。
+链接就是钥匙，别发给别人；泄露了就在设置页或 `f` 菜单里「重置登录链接」，
+旧链接和所有设备的登录一起作废。
+
+从老版本升上来时会自动生成密钥，原来的访问路径和口令不再使用（文件会被删掉），
+用 `f info` 看新的登录链接。
 
 ### Docker
 
@@ -91,7 +98,13 @@ docker run -d --name fanout \
 - 需要 **`--security-opt apparmor=unconfined`**。`ip netns add` 会调 `mount --make-shared`，
   Docker 默认的 AppArmor 策略会把它拦成 EPERM，隧道会以
   `mount --make-shared /run/netns failed: Permission denied` 失败。
-- `/var/lib/fanout` 挂出来，重建容器后口令、访问路径和隧道状态都还在。
+- `/var/lib/fanout` 挂出来，重建容器后登录链接和隧道状态都还在。
+
+容器里没有 `f` 菜单，登录链接这样看：
+
+```bash
+docker exec fanout fanout -link
+```
 
 宿主上要开着 `net.ipv4.ip_forward`（跑 Docker 的机器默认就是开的）。容器里 `/proc/sys` 是只读的，
 fanout 会读一下当前值，已经是 1 就直接用；如果宿主上确实是 0，需要在宿主执行
@@ -126,7 +139,7 @@ cp docker-compose.yml.example docker-compose.yml
 每行右侧的按钮可以换一个节点（出口 IP 变、端口不变，已分发的客户端配置不用改），
 或者停掉这个出口。换节点会避开这条出口之前用过的节点，连点几次每次都是新 IP。
 
-点「连接信息」能看到完整地址，`socks5://` 和 `http://` 两种形式都给出来，直接复制给客户端。
+点端口按钮能看到完整地址，`socks5://` 和 `http://` 两种形式都给出来，直接复制给客户端。
 用哪个看客户端支持什么：只认 HTTP 代理的程序（比如 Python 的 urllib）就用 `http://` 那条。
 口令可以单独重置，重置后两种地址一起失效。
 
@@ -205,29 +218,29 @@ Environment=FANOUT_PSIPHON_BIN=/usr/local/bin/psiphon-tunnel-core
 
 ## 运维
 
-装完后敲 `f` 打开管理菜单：启停、看日志、查隧道、改端口/口令/访问路径、卸载。
+装完后敲 `f` 打开管理菜单：启停、看日志、查隧道、看登录链接、改端口、卸载。
 
 ```
   状态      运行中
   版本      fanout v2.0.1
   开机自启  enabled
 
-  管理地址  http://1.2.3.4:8899/gwPuWHvaNr/
-  访问口令  f81120ac328d11c11b
+  登录链接  http://1.2.3.4:8899/?k=Zx9QpL2mVb7RkT4wYc8HnJ3sFd6GaE1u
 
    1) 启动          2) 停止
    3) 重启          4) 查看日志
    5) 隧道列表      6) 连接信息
-   7) 改端口        8) 改口令
-   9) 改访问路径   10) 开机自启开关
-  11) 更新         12) 卸载
-  13) 交流群 / 反馈
+   7) 改端口        8) 重置登录链接
+   9) 开机自启开关
+  10) 更新         11) 卸载
+  12) 交流群 / 反馈
 ```
 
 也可以直接带参数用：
 
 ```bash
-f info       # 连接信息
+f info       # 连接信息（含登录链接）
+f link       # 只打印登录链接
 f list       # 隧道列表
 f restart    # 重启
 f log        # 跟踪日志
@@ -250,7 +263,8 @@ netns 仍能经母机 NAT 出网，只看通不通会漏判。连续两次不符
 - 域名仍在本机解析：SOCKS5 的域名由 fanout 在母机上解析后再从隧道出去。
 - VPN Gate 是志愿者节点，有相当比例已下线或满员（`AUTH_FAILED`）。
   启动时连不上会自动顺着同地区候选往下试，最多 6 个；失败原因会写在日志和界面上。
-- 管理界面只有随机路径 + 口令登录，没有 HTTPS。放公网建议前面套一层反代。
+- 管理界面是明文 HTTP：登录链接和 cookie 在网络上能被截获。放公网建议前面套一层
+  HTTPS 反代，或者在设置里把监听地址改成仅本机、用 SSH 隧道访问。
 - 换节点会避开这条出口之前用过的节点（最多记 16 个），同地区都换过一轮后
   从头开始。一个地区只有一个可用节点时换不动，界面会直接说明原因。
 - Psiphon 出口只转 TCP、出口 IP 不固定，官方客户端只有 x86_64，详见

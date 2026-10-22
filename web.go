@@ -238,6 +238,19 @@ label.chk input{margin:0}
 .ef>span{display:block;color:var(--dim);font-size:11.5px;margin-bottom:5px}
 .credrow{display:flex;align-items:flex-end;gap:12px;flex-wrap:wrap;margin:6px 0 10px}
 .credrow .ef input{width:200px;font-family:var(--mono)}
+.linkbox{display:flex;align-items:center;gap:6px;background:var(--panel);border:1px solid var(--line2);
+  border-radius:7px;padding:4px 4px 4px 11px}
+.linkbox .addr{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+  color:var(--dim);font-size:12px;font-family:var(--mono)}
+button.danger{background:transparent;color:var(--bad);border-color:rgba(224,96,91,.45);padding:4px 10px}
+button.danger:hover:not(:disabled){border-color:var(--bad);background:var(--bad-w)}
+.lost{position:fixed;inset:0;z-index:90;display:flex;align-items:center;justify-content:center;
+  background:rgba(5,8,12,.88);padding:20px}
+.lost .card{max-width:420px;background:var(--panel);border:1px solid var(--line2);border-radius:12px;padding:22px 24px}
+.lost h2{font-size:15px;margin:0 0 8px}
+.lost p{margin:0;color:var(--dim);line-height:1.7}
+.lost code{font-family:var(--mono);color:var(--text);background:var(--bg);border:1px solid var(--line);
+  border-radius:4px;padding:1px 5px;white-space:nowrap}
 .toast{position:fixed;left:50%;bottom:24px;transform:translateX(-50%);
   background:var(--panel2);border:1px solid var(--line2);border-radius:8px;
   padding:9px 15px;font-size:12.5px;z-index:80;opacity:0;pointer-events:none;
@@ -428,13 +441,15 @@ label.chk input{margin:0}
       </button>
     </div>
     <div class="body">
-      <label class="f"><span>访问口令</span>
-        <input id="setPw" type="password" spellcheck="false" autocomplete="new-password" placeholder="留空则不改"></label>
-      <div class="hint" style="margin-top:-12px;margin-bottom:18px">改完只影响新登录，当前这个浏览器不会被踢下线。</div>
-
-      <label class="f"><span>访问路径</span>
-        <input id="setPath" type="text" spellcheck="false" placeholder="留空则去掉路径前缀"></label>
-      <div class="hint" id="setPathHint" style="margin-top:-12px;margin-bottom:18px">界面挂在这个路径下，扫端口的探不到。只能用字母数字和 - _。</div>
+      <span class="fl">登录链接</span>
+      <div class="linkbox">
+        <span class="addr" id="setLink">读取中…</span>
+        <button class="icon" id="linkCopy" title="复制完整的登录链接">
+          <svg viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+        </button>
+        <button class="danger" id="linkReset" title="换一个密钥，旧链接和所有设备的登录一起作废">重置</button>
+      </div>
+      <div class="hint" style="margin-bottom:18px">在别的设备上打开一次这个链接就能登录，记住 30 天，常用会自动续期。链接就是钥匙，别发给别人。</div>
 
       <label class="chk"><input type="checkbox" id="setResi"> 只用家宽节点</label>
       <div class="hint" id="setResiHint">vpngate 里混着一批它自己的机房机器，出口一眼看得出是数据中心。勾着就只挑志愿者家宽。</div>
@@ -469,6 +484,14 @@ label.chk input{margin:0}
   </div>
 </div>
 
+<div class="lost" id="lost" hidden>
+  <div class="card">
+    <h2>登录已失效</h2>
+    <p>登录链接可能被重置了，或者这台设备太久没来过。在服务器上运行 <code>f info</code>
+      （Docker 用 <code>docker exec fanout fanout -link</code>）看登录链接，再打开一次。</p>
+  </div>
+</div>
+
 <div class="toast" id="toast"></div>
 
 <script>
@@ -486,9 +509,15 @@ const ICON = {
   lock:'<svg viewBox="0 0 24 24"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>'
 };
 
-// 界面挂在随机前缀下，请求一律走相对路径
+// 请求一律走相对路径，换端口、套反代都不用改
 async function api(path, opts){
   const r = await fetch(path.replace(/^\//, ''), opts);
+  // 没登录时服务端对一切请求都回 404。界面能打开说明之前是登录着的，
+  // 现在 404 就是 cookie 失效了（密钥在别处被重置、或太久没来），说清楚该怎么办
+  if(r.status === 404){
+    $('#lost').hidden = false;
+    throw new Error('登录已失效');
+  }
   const d = await r.json().catch(()=>({}));
   if(!r.ok) throw new Error(d.error || ('HTTP '+r.status));
   return d;
@@ -1127,18 +1156,38 @@ $('#crsave').onclick = async e => {
   btn.disabled = false;
 };
 
-// ---- 设置：改密码 / 改路径 / 改端口 / 改本地监听 ----
-let curSettings = null;
+// ---- 设置：登录链接 / 改端口 / 改本地监听 / 开关 ----
+let curSettings = null, curKey = '';
+
+// 登录链接用当前地址拼：用户从哪个地址打开的面板，在别的设备上也该用这个地址
+function loginURL(key){ return location.protocol + '//' + location.host + '/?k=' + encodeURIComponent(key); }
+// 面板上只露头尾，免得被旁边的人看去；复制出来的是完整链接
+function showLink(key){
+  curKey = key || '';
+  $('#setLink').textContent = curKey
+    ? location.protocol + '//' + location.host + '/?k=' + curKey.slice(0, 4) + '…' + curKey.slice(-4)
+    : '读取失败';
+}
+$('#linkCopy').onclick = () => { if(curKey) copy(loginURL(curKey)); };
+$('#linkReset').onclick = async e => {
+  if(!confirm('重置登录链接？旧链接作废，其他设备都要用新链接重新登录（这个浏览器不受影响）。')) return;
+  const btn = e.currentTarget;
+  btn.disabled = true;
+  try{
+    const r = await api('/api/key/reset', {method:'POST'});
+    showLink(r.login_key);
+    toast('已重置，新链接已生成');
+  }catch(err){ toast(err.message, true); }
+  btn.disabled = false;
+};
 
 $('#settingsBtn').onclick = async () => {
-  $('#setPw').value = '';
-  $('#setPath').value = '';
-  $('#setPathHint').textContent = '读取中…';
+  $('#setLink').textContent = '读取中…';
   openModal('settings');
   try{
     const s = await api('/api/settings');
     curSettings = s;
-    $('#setPath').value = (s.base_path || '').replace(/^\//, '');
+    showLink(s.login_key);
     $('#setPort').value = s.port || '';
     $('#setListen').value = s.listen_addr || '0.0.0.0';
     $('#setResi').checked = s.residential_only !== false;
@@ -1148,8 +1197,7 @@ $('#settingsBtn').onclick = async () => {
     $('#updApply').hidden = true;
     $('#updCheck').disabled = false;
     $('#updCheck').textContent = '检查更新';
-    $('#setPathHint').textContent = '界面挂在这个路径下，扫端口的探不到。只能用字母数字和 - _。';
-  }catch(err){ $('#setPathHint').textContent = '读取失败: ' + err.message; }
+  }catch(err){ $('#setLink').textContent = '读取失败: ' + err.message; }
 };
 
 // 检查更新：问后端 GitHub 最新版，有新版就亮出更新按钮和更新内容
@@ -1203,19 +1251,16 @@ $('#updApply').onclick = async e => {
   }
 };
 
-// 端口/监听地址变了要提示用户之后从新地址进；密码/路径可原地生效
-function nextURL(port, listen, path){
+// 端口/监听地址变了要提示用户之后从新地址进。cookie 不分端口，换了端口照样是登录状态
+function nextURL(port, listen){
   const host = (listen && listen !== '0.0.0.0') ? listen : location.hostname;
-  return location.protocol + '//' + host + ':' + port + (path ? '/' + path : '') + '/';
+  return location.protocol + '//' + host + ':' + port + '/';
 }
 
 $('#setSave').onclick = async e => {
   const btn = e.currentTarget;
   btn.disabled = true;
   const body = {};
-  const pw = $('#setPw').value.trim();
-  if(pw) body.password = pw;
-  body.base_path = $('#setPath').value.trim();
   const port = parseInt($('#setPort').value.trim(), 10);
   if(port) body.port = port;
   body.listen_addr = $('#setListen').value;
@@ -1231,20 +1276,12 @@ $('#setSave').onclick = async e => {
       body: JSON.stringify(body),
     });
     if(portChanged){
-      const url = nextURL(port, body.listen_addr, body.base_path);
+      const url = nextURL(port, body.listen_addr);
       $('#setPortHint').innerHTML = '监听已切换，请从新地址打开：<a href="' + esc(url) + '">' + esc(url) + '</a>';
       toast('监听已切换，用新地址重新打开');
       // 端口变了当前连接会断，不自动跳转，让用户看清新地址
     } else {
       toast('已保存');
-      // 路径可能变了，重新加载到新路径下
-      const np = body.base_path;
-      const cur = (curSettings && curSettings.base_path || '').replace(/^\//, '');
-      if(np !== cur){
-        location.href = location.protocol + '//' + location.host
-          + (np ? '/' + np : '') + '/';
-        return;
-      }
       closeModal('settings');
       poll();
     }
