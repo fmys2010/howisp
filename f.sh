@@ -5,7 +5,7 @@ set -uo pipefail
 WORK_DIR=/var/lib/fanout
 SERVICE=fanout
 BIN=/usr/local/bin/fanout
-REPO="${REPO:-byJoey/fanout}"
+REPO="${REPO:-fmys2010/howisp}"
 
 G='\033[0;32m'; R='\033[0;31m'; Y='\033[0;33m'; B='\033[0;36m'; D='\033[2m'; N='\033[0m'
 
@@ -235,12 +235,9 @@ EOF
 
 show_links() {
   echo
-  echo -e "  交流群  ${B}https://t.me/+ft-zI76oovgwNmRh${N}"
-  echo -e "  油管    ${B}https://youtube.com/@joeyblog${N}"
-  echo -e "  博客    ${B}https://joeyblog.net${N}"
-  echo -e "  项目    ${B}https://github.com/byJoey/fanout${N}"
+  echo -e "  项目    ${B}https://github.com/fmys2010/howisp${N}"
   echo
-  echo -e "  ${D}用着有问题、或者想要什么功能，去群里说或提 issue。${N}"
+  echo -e "  ${D}用着有问题、或者想要什么功能，到 GitHub 提 issue：https://github.com/fmys2010/howisp/issues${N}"
 }
 
 # del_fanout_rules 删掉 fanout 加过的 iptables 规则。
@@ -333,7 +330,7 @@ do_uninstall() {
 menu() {
   while true; do
     clear
-    echo -e "${B}  fanout${N}  ${D}VPN Gate 出口扇出网关${N}"
+    echo -e "${B}  howisp${N}  ${D}多出口代理网关${N}"
     show_info
     echo -e "${D}  ─────────────────────────────${N}"
     echo "   1) 启动          2) 停止"
@@ -345,7 +342,7 @@ menu() {
     echo "   9) 开机自启开关"
     echo
     echo "  10) 更新         11) 卸载"
-    echo "  12) 交流群 / 反馈"
+    echo "  12) 反馈"
     echo "   0) 退出"
     echo -e "${D}  ─────────────────────────────${N}"
     read -rp "  选择: " choice
