@@ -1,299 +1,219 @@
 package main
 
 import (
+	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
-	"encoding/hex"
+	"encoding/base64"
 	"fmt"
-	"net"
+	"log"
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 )
 
-// Auth 给管理界面加一层登录。
-// 口令存在工作目录下，首次启动自动生成，避免公网上裸奔。
-type Auth struct {
-	dir      string
-	password string
-	mu       sync.RWMutex
-	sessions map[string]time.Time
-	// 按来源 IP 记录登录失败，挡低速凭据喷洒
-	fails map[string]*loginFails
-}
+// 管理界面的登录：一条带密钥的链接 + 签名 cookie。
+//
+// 打开一次 http://IP:端口/?k=<密钥>，服务端发一个 30 天的签名 cookie，
+// 再跳回不带密钥的地址（别让密钥留在地址栏和浏览记录里）。之后凭 cookie 访问，
+// 重启、升级都不掉线；常用的设备会自动续期，一直不用重新登录。
+//
+// 没有 cookie 也没有密钥的请求一律 404：没有登录页、没有表单，
+// 扫端口的看不出这里跑着什么，也无从爆破——密钥是 192 位随机数，猜不出来。
+//
+// cookie 用密钥本身做 HMAC，服务端不存会话：重置密钥，所有设备的 cookie 一起失效。
+//
+// 以前是"随机访问路径 + 口令"两样东西，会话只活 12 小时、重启就全掉，用起来太麻烦。
 
-// loginFails 跟踪单个来源 IP 的连续失败。
-type loginFails struct {
-	count   int
-	last    time.Time
-	blocked time.Time
-}
-
-const sessionTTL = 12 * time.Hour
-
-// 登录失败节流：同一 IP 连续错 loginMaxFails 次后，锁 loginBlockFor。
-// 阈值给得宽松，正常用户偶尔输错不受影响；成功登录会清零。
 const (
-	loginMaxFails  = 8
-	loginBlockFor  = 2 * time.Minute
-	loginFailReset = 10 * time.Minute
+	keyFile       = "key"
+	sessionCookie = "fanout_session"
+	sessionTTL    = 30 * 24 * time.Hour
+	// sessionRenew 是剩余有效期低于多少时续签。常用的设备每隔半个月自动换一张新 cookie。
+	sessionRenew = 15 * 24 * time.Hour
+	// keyHeader 给 f 脚本这类命令行调用用：带着密钥直接调 /api/，不用走 cookie。
+	keyHeader = "X-Fanout-Key"
 )
 
-// NewAuth 载入或生成访问口令。返回口令是否为本次新建。
-func NewAuth(dir string) (*Auth, bool, error) {
-	path := filepath.Join(dir, "password")
-	created := false
+// Auth 管登录密钥与 cookie 的签发、校验。
+type Auth struct {
+	dir string
+	mu  sync.RWMutex
+	key string
+}
 
+// NewAuth 载入或生成登录密钥。返回密钥是否为本次新建。
+//
+// 第一次生成密钥时顺手删掉老版本留下的 password / basepath：
+// 那两样已经不起作用了，留着只会让人以为还能用。
+func NewAuth(dir string) (*Auth, bool, error) {
+	path := filepath.Join(dir, keyFile)
 	blob, err := os.ReadFile(path)
-	if os.IsNotExist(err) {
-		pw, gerr := randomToken(9)
-		if gerr != nil {
-			return nil, false, gerr
+	if err == nil {
+		if key := strings.TrimSpace(string(blob)); key != "" {
+			return &Auth{dir: dir, key: key}, false, nil
 		}
-		if werr := os.WriteFile(path, []byte(pw+"\n"), 0600); werr != nil {
-			return nil, false, fmt.Errorf("写口令文件失败: %w", werr)
-		}
-		blob = []byte(pw)
-		created = true
-	} else if err != nil {
+	} else if !os.IsNotExist(err) {
 		return nil, false, err
 	}
 
-	return &Auth{
-		dir:      dir,
-		password: strings.TrimSpace(string(blob)),
-		sessions: map[string]time.Time{},
-		fails:    map[string]*loginFails{},
-	}, created, nil
+	a := &Auth{dir: dir}
+	if _, err := a.ResetKey(); err != nil {
+		return nil, false, err
+	}
+	for _, legacy := range []string{"password", "basepath"} {
+		if os.Remove(filepath.Join(dir, legacy)) == nil {
+			log.Printf("登录方式已换成登录链接，删除不再使用的 %s", filepath.Join(dir, legacy))
+		}
+	}
+	return a, true, nil
 }
 
-func randomToken(n int) (string, error) {
-	b := make([]byte, n)
+// newKey 生成一个登录密钥：24 字节随机数，URL 安全的 base64，32 个字符。
+func newKey() (string, error) {
+	b := make([]byte, 24)
 	if _, err := rand.Read(b); err != nil {
 		return "", err
 	}
-	return hex.EncodeToString(b), nil
+	return base64.RawURLEncoding.EncodeToString(b), nil
 }
 
-// check 比对口令，用恒定时间比较避免时序泄漏。
-func (a *Auth) check(pw string) bool {
+// Key 返回当前密钥。
+func (a *Auth) Key() string {
 	a.mu.RLock()
-	cur := a.password
-	a.mu.RUnlock()
-	want := sha256.Sum256([]byte(cur))
-	got := sha256.Sum256([]byte(pw))
-	return subtle.ConstantTimeCompare(want[:], got[:]) == 1
+	defer a.mu.RUnlock()
+	return a.key
 }
 
-// SetPassword 改访问口令并落盘。空口令拒绝，避免误改成无密码裸奔。
-// 改完不动已有会话：当前登录的浏览器不会被踢，新登录才用新口令。
-func (a *Auth) SetPassword(pw string) error {
-	pw = strings.TrimSpace(pw)
-	if pw == "" {
-		return fmt.Errorf("口令不能为空")
-	}
-	if len(pw) < 4 {
-		return fmt.Errorf("口令至少 4 位")
-	}
-	path := filepath.Join(a.dir, "password")
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, []byte(pw+"\n"), 0600); err != nil {
-		return fmt.Errorf("写口令文件失败: %w", err)
-	}
-	if err := os.Rename(tmp, path); err != nil {
-		return fmt.Errorf("保存口令失败: %w", err)
-	}
-	a.mu.Lock()
-	a.password = pw
-	a.mu.Unlock()
-	return nil
-}
-
-// issue 发一个会话 token。
-func (a *Auth) issue() (string, error) {
-	tok, err := randomToken(16)
+// ResetKey 换一个新密钥并落盘。所有已发出的 cookie 随之失效。
+func (a *Auth) ResetKey() (string, error) {
+	key, err := newKey()
 	if err != nil {
 		return "", err
 	}
-	a.mu.Lock()
-	a.sessions[tok] = time.Now().Add(sessionTTL)
-	// 顺手清掉过期会话
-	for k, exp := range a.sessions {
-		if time.Now().After(exp) {
-			delete(a.sessions, k)
-		}
+	path := filepath.Join(a.dir, keyFile)
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, []byte(key+"\n"), 0600); err != nil {
+		return "", fmt.Errorf("写登录密钥失败: %w", err)
 	}
+	if err := os.Rename(tmp, path); err != nil {
+		return "", fmt.Errorf("保存登录密钥失败: %w", err)
+	}
+	a.mu.Lock()
+	a.key = key
 	a.mu.Unlock()
-	return tok, nil
+	return key, nil
 }
 
-func (a *Auth) valid(tok string) bool {
-	a.mu.RLock()
-	exp, ok := a.sessions[tok]
-	a.mu.RUnlock()
-	return ok && time.Now().Before(exp)
+// checkKey 比对密钥。先各自哈希再比，长度不同也走同样的路径，不泄漏时序。
+func (a *Auth) checkKey(k string) bool {
+	cur := a.Key()
+	if cur == "" || k == "" {
+		return false
+	}
+	want := sha256.Sum256([]byte(cur))
+	got := sha256.Sum256([]byte(strings.TrimSpace(k)))
+	return subtle.ConstantTimeCompare(want[:], got[:]) == 1
 }
 
-const sessionCookie = "fanout_session"
-
-// Wrap 保护一个 handler，未登录时 API 返回 401、页面跳登录。
-func (a *Auth) Wrap(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/login" {
-			a.handleLogin(w, r)
-			return
-		}
-		if c, err := r.Cookie(sessionCookie); err == nil && a.valid(c.Value) {
-			next.ServeHTTP(w, r)
-			return
-		}
-		if strings.HasPrefix(r.URL.Path, "/api/") {
-			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "未登录"})
-			return
-		}
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		_, _ = w.Write([]byte(loginHTML))
-	})
+// sign 给 cookie 的有效期和随机数签名。
+func sign(key string, exp int64, nonce string) string {
+	m := hmac.New(sha256.New, []byte(key))
+	fmt.Fprintf(m, "fanout-session/v1|%d|%s", exp, nonce)
+	return base64.RawURLEncoding.EncodeToString(m.Sum(nil))
 }
 
-// blocked 判断某来源 IP 是否处于登录冷却期。
-func (a *Auth) blocked(ip string) bool {
-	a.mu.RLock()
-	defer a.mu.RUnlock()
-	f, ok := a.fails[ip]
-	return ok && time.Now().Before(f.blocked)
-}
-
-// recordFail 记一次失败，达到阈值就进入冷却。
-func (a *Auth) recordFail(ip string) {
-	now := time.Now()
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	f, ok := a.fails[ip]
-	// 距上次失败太久就重新计数，避免长期累积误伤
-	if !ok || (f.blocked.IsZero() && now.Sub(f.last) > loginFailReset) {
-		f = &loginFails{}
-		a.fails[ip] = f
+// issueCookie 签发一张新 cookie：<到期时间>.<随机数>.<签名>。
+func (a *Auth) issueCookie(w http.ResponseWriter) error {
+	b := make([]byte, 9)
+	if _, err := rand.Read(b); err != nil {
+		return err
 	}
-	f.count++
-	f.last = now
-	if f.count >= loginMaxFails {
-		f.blocked = now.Add(loginBlockFor)
-		f.count = 0
-	}
-	// 顺手清掉早已过期的记录，别让 map 无限增长
-	for k, v := range a.fails {
-		if now.Sub(v.last) > loginFailReset && now.After(v.blocked) {
-			delete(a.fails, k)
-		}
-	}
-}
-
-// clearFails 登录成功后清掉该 IP 的失败记录。
-func (a *Auth) clearFails(ip string) {
-	a.mu.Lock()
-	delete(a.fails, ip)
-	a.mu.Unlock()
-}
-
-// clientIP 从 RemoteAddr 取来源 IP。服务直接监听公网端口、不在反代后，
-// 所以不采信 X-Forwarded-For 之类可伪造的头。
-func clientIP(r *http.Request) string {
-	host, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err != nil {
-		return r.RemoteAddr
-	}
-	return host
-}
-
-func (a *Auth) handleLogin(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		_, _ = w.Write([]byte(loginHTML))
-		return
-	}
-	ip := clientIP(r)
-	if a.blocked(ip) {
-		writeJSON(w, http.StatusTooManyRequests, map[string]string{"error": "登录失败次数过多，请稍后再试"})
-		return
-	}
-	if !a.check(r.FormValue("password")) {
-		a.recordFail(ip)
-		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "口令不对"})
-		return
-	}
-	a.clearFails(ip)
-	tok, err := a.issue()
-	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
-		return
-	}
+	exp := time.Now().Add(sessionTTL).Unix()
+	nonce := base64.RawURLEncoding.EncodeToString(b)
 	http.SetCookie(w, &http.Cookie{
 		Name:     sessionCookie,
-		Value:    tok,
+		Value:    strconv.FormatInt(exp, 10) + "." + nonce + "." + sign(a.Key(), exp, nonce),
 		Path:     "/",
 		HttpOnly: true,
+		// Lax 而不是 Strict：从聊天软件、书签点进来是跨站的顶层跳转，
+		// Strict 不带 cookie，用户会对着一个 404 发愣
 		SameSite: http.SameSiteLaxMode,
 		MaxAge:   int(sessionTTL.Seconds()),
 	})
-	writeJSON(w, http.StatusOK, map[string]string{"ok": "已登录"})
+	return nil
 }
 
-const loginHTML = `<!DOCTYPE html>
-<html lang="zh-CN">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>fanout</title>
-<style>
-body{margin:0;min-height:100vh;display:flex;flex-direction:column;gap:18px;
-  align-items:center;justify-content:center;padding:16px;box-sizing:border-box;
-  background:radial-gradient(ellipse at 50% 30%,#121a26 0%,#0c1016 65%);color:#e2e8f0;
-  font:13px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif}
-.links{display:flex;gap:16px}
-.links a{color:#8b97a8;text-decoration:none;font-size:12px}
-.links a:hover{color:#4c9fe6}
-form{background:#131921;border:1px solid #222b37;border-radius:12px;
-  padding:24px 26px;width:min(320px,100%);box-sizing:border-box;box-shadow:0 24px 60px rgba(0,0,0,.35)}
-h1{display:flex;align-items:center;gap:9px;font-size:16px;font-weight:650;margin:0 0 18px}
-h1 svg{width:20px;height:20px;stroke:#4c9fe6;fill:none;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
-label{display:block;color:#8b97a8;font-size:11.5px;margin-bottom:7px}
-input{width:100%;box-sizing:border-box;background:#0c1016;border:1px solid #2c3746;
-  color:#e2e8f0;border-radius:7px;padding:8px 10px;font:inherit}
-input:focus{outline:none;border-color:#4c9fe6}
-button{width:100%;margin-top:14px;background:#4c9fe6;border:0;color:#08111b;
-  font:inherit;font-weight:600;border-radius:7px;padding:9px;cursor:pointer}
-button:hover{background:#62adec}
-.err{color:#e0605b;font-size:11.5px;margin-top:10px;min-height:14px}
-</style>
-</head>
-<body>
-<form id="f">
-  <h1><svg viewBox="0 0 24 24"><circle cx="5" cy="12" r="2"/><path d="M7 12h4"/><path d="M11 12 19 5"/><path d="M11 12h8"/><path d="m11 12 8 7"/></svg>fanout</h1>
-  <label for="pw">访问口令</label>
-  <input type="password" id="pw" autofocus autocomplete="current-password">
-  <button type="submit">进入</button>
-  <div class="err" id="err"></div>
-</form>
-<div class="links">
-  <a href="https://t.me/+ft-zI76oovgwNmRh" target="_blank" rel="noopener">交流群</a>
-  <a href="https://youtube.com/@joeyblog" target="_blank" rel="noopener">油管</a>
-  <a href="https://joeyblog.net" target="_blank" rel="noopener">博客</a>
-  <a href="https://github.com/byJoey/fanout" target="_blank" rel="noopener">GitHub</a>
-</div>
-<script>
-document.getElementById('f').onsubmit = async e => {
-  e.preventDefault();
-  const body = new URLSearchParams({password: document.getElementById('pw').value});
-  const r = await fetch('login', {method:'POST', body});
-  if(r.ok){ location.reload(); return; }
-  const d = await r.json().catch(()=>({}));
-  document.getElementById('err').textContent = d.error || '登录失败';
-};
-</script>
-</body>
-</html>`
+// cookieExpiry 校验 cookie，返回它的到期时间。
+func (a *Auth) cookieExpiry(v string) (time.Time, bool) {
+	parts := strings.Split(v, ".")
+	if len(parts) != 3 {
+		return time.Time{}, false
+	}
+	exp, err := strconv.ParseInt(parts[0], 10, 64)
+	if err != nil {
+		return time.Time{}, false
+	}
+	want := sign(a.Key(), exp, parts[1])
+	if subtle.ConstantTimeCompare([]byte(want), []byte(parts[2])) != 1 {
+		return time.Time{}, false
+	}
+	at := time.Unix(exp, 0)
+	if !time.Now().Before(at) {
+		return time.Time{}, false
+	}
+	return at, true
+}
+
+// Wrap 保护整个管理界面。
+func (a *Auth) Wrap(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// 页面里有外链，别把管理界面的地址经 Referer 带出去
+		w.Header().Set("Referrer-Policy", "no-referrer")
+
+		// 命令行调用：请求头带密钥，只放行 API
+		if k := r.Header.Get(keyHeader); k != "" {
+			if strings.HasPrefix(r.URL.Path, "/api/") && a.checkKey(k) {
+				next.ServeHTTP(w, r)
+				return
+			}
+			http.NotFound(w, r)
+			return
+		}
+
+		// 登录链接：发 cookie，再跳回不带密钥的地址
+		if k := r.URL.Query().Get("k"); k != "" {
+			if !a.checkKey(k) {
+				http.NotFound(w, r)
+				return
+			}
+			if err := a.issueCookie(w); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			u := *r.URL
+			q := u.Query()
+			q.Del("k")
+			u.RawQuery = q.Encode()
+			w.Header().Set("Cache-Control", "no-store")
+			http.Redirect(w, r, u.RequestURI(), http.StatusSeeOther)
+			return
+		}
+
+		if c, err := r.Cookie(sessionCookie); err == nil {
+			if exp, ok := a.cookieExpiry(c.Value); ok {
+				if time.Until(exp) < sessionRenew {
+					_ = a.issueCookie(w)
+				}
+				next.ServeHTTP(w, r)
+				return
+			}
+		}
+		http.NotFound(w, r)
+	})
+}

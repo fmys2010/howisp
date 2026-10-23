@@ -85,8 +85,9 @@ web_port() {
     | grep -oE '[0-9]+' | head -1 || echo 8899
 }
 
-public_ip() {
-  curl -s --max-time 6 http://api.ipify.org 2>/dev/null || echo "<本机IP>"
+# login_link 打印管理界面的登录链接。格式只在程序里维护（fanout -link），这里不拼。
+login_link() {
+  "$BIN" -link -dir "$WORK_DIR" 2>&1
 }
 
 pause() {
@@ -95,11 +96,8 @@ pause() {
 }
 
 show_info() {
-  local state port bp pw ip
-  state=$(svc_state); port=$(web_port)
-  bp=$(cat "$WORK_DIR/basepath" 2>/dev/null || echo "-")
-  pw=$(cat "$WORK_DIR/password" 2>/dev/null || echo "-")
-  ip=$(public_ip)
+  local state
+  state=$(svc_state)
 
   echo
   if [[ $state == running ]]; then
@@ -110,8 +108,8 @@ show_info() {
   echo -e "  版本      $("$BIN" -version 2>/dev/null || echo '-')"
   echo -e "  开机自启  $(svc_enabled_text)"
   echo
-  echo -e "  ${B}管理地址  http://${ip}:${port}/${bp}/${N}"
-  echo -e "  ${B}访问口令  ${pw}${N}"
+  echo -e "  ${B}登录链接  $(login_link)${N}"
+  echo -e "  ${D}          打开一次就记住登录（30 天，常用会自动续期）；别发给别人${N}"
   echo
 
   local n
@@ -120,16 +118,14 @@ show_info() {
 }
 
 list_tunnels() {
-  local port bp pw ck
+  local port key ck
   port=$(web_port)
-  bp=$(cat "$WORK_DIR/basepath" 2>/dev/null)
-  pw=$(cat "$WORK_DIR/password" 2>/dev/null)
+  key=$(cat "$WORK_DIR/key" 2>/dev/null)
   ck=$(mktemp)
 
-  curl -s --max-time 10 -c "$ck" -X POST -d "password=${pw}" \
-    "http://127.0.0.1:${port}/${bp}/login" -o /dev/null
+  # 带着登录密钥直接调 API，不用走 cookie
   echo
-  curl -s --max-time 10 -b "$ck" "http://127.0.0.1:${port}/${bp}/api/tunnels" \
+  curl -s --max-time 10 -H "X-Fanout-Key: ${key}" "http://127.0.0.1:${port}/api/tunnels" \
     > "$ck.json" 2>/dev/null
   rm -f "$ck"
 
@@ -179,35 +175,25 @@ change_port() {
   echo -e "  ${G}已改为 ${new} 并重启${N}"
 }
 
-reset_password() {
-  local pw
+# reset_key 换一个登录密钥：所有已登录的浏览器都要用新链接重新登录。
+# 服务在跑就调接口换（不用重启，隧道不断）；没在跑就删掉密钥文件，启动时重新生成。
+reset_key() {
+  local yes key port
   echo
-  read -rp "  新口令 (留空则随机生成): " pw
-  if [[ -z $pw ]]; then
-    pw=$(head -c 9 /dev/urandom | od -An -tx1 | tr -d ' \n')
-  fi
-  umask 077
-  echo "$pw" > "$WORK_DIR/password"
-  svc_restart
-  echo -e "  ${G}新口令: ${pw}${N}"
-}
-
-reset_basepath() {
-  local bp
-  echo
-  read -rp "  新访问路径 (留空则随机生成): " bp
-  if [[ -z $bp ]]; then
-    rm -f "$WORK_DIR/basepath"
+  read -rp "  重置后所有已登录的浏览器都要用新链接重新登录，继续？[y/N]: " yes
+  [[ ${yes,,} == y ]] || { echo "  已取消"; return; }
+  key=$(cat "$WORK_DIR/key" 2>/dev/null)
+  port=$(web_port)
+  if ! curl -fs --max-time 10 -X POST -H "X-Fanout-Key: ${key}" \
+       "http://127.0.0.1:${port}/api/key/reset" -o /dev/null; then
+    rm -f "$WORK_DIR/key"
     svc_restart
-    sleep 2
-    bp=$(cat "$WORK_DIR/basepath" 2>/dev/null)
-  else
-    bp=${bp#/}; bp=${bp%/}
-    umask 077
-    echo "$bp" > "$WORK_DIR/basepath"
-    svc_restart
+    for _ in $(seq 1 10); do
+      [[ -s "$WORK_DIR/key" ]] && break
+      sleep 1
+    done
   fi
-  echo -e "  ${G}新路径: /${bp}/${N}"
+  echo -e "  ${G}新的登录链接: $(login_link)${N}"
 }
 
 ipv6_state() {
@@ -352,11 +338,11 @@ menu() {
     echo
     echo "   5) 隧道列表      6) 连接信息"
     echo
-    echo "   7) 改端口        8) 改口令"
-    echo "   9) 改访问路径   10) 开机自启开关"
+    echo "   7) 改端口        8) 重置登录链接"
+    echo "   9) 开机自启开关"
     echo
-    echo "  11) 更新         12) 卸载"
-    echo "  13) 交流群 / 反馈"
+    echo "  10) 更新         11) 卸载"
+    echo "  12) 交流群 / 反馈"
     echo "   0) 退出"
     echo -e "${D}  ─────────────────────────────${N}"
     read -rp "  选择: " choice
@@ -369,9 +355,8 @@ menu() {
       5) list_tunnels; pause ;;
       6) show_info; pause ;;
       7) change_port; pause ;;
-      8) reset_password; pause ;;
-      9) reset_basepath; pause ;;
-      10)
+      8) reset_key; pause ;;
+      9)
         if svc_is_enabled; then
           svc_disable
           echo -e "\n  ${Y}已关闭开机自启${N}"
@@ -380,9 +365,9 @@ menu() {
           echo -e "\n  ${G}已开启开机自启${N}"
         fi
         pause ;;
-      11) do_update; pause ;;
-      12) do_uninstall; pause ;;
-      13) show_links; pause ;;
+      10) do_update; pause ;;
+      11) do_uninstall; pause ;;
+      12) show_links; pause ;;
       0) exit 0 ;;
       *) ;;
     esac
@@ -399,12 +384,13 @@ case "${1:-}" in
   status)   svc_status_page ;;
   log)      svc_logs_follow ;;
   info)     show_info ;;
+  link)     login_link ;;
   list)     list_tunnels ;;
   update)   do_update ;;
   uninstall) do_uninstall ;;
   "")       menu ;;
   *)
-    echo "用法: f [start|stop|restart|status|log|info|list|update|uninstall]"
+    echo "用法: f [start|stop|restart|status|log|info|link|list|update|uninstall]"
     echo "不带参数进入交互菜单"
     ;;
 esac

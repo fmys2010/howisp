@@ -32,7 +32,7 @@ services:
       - /dev/net/tun
 
     volumes:
-      # 口令、访问路径、隧道状态都在这里，换容器不用重新配置
+      # 登录密钥、隧道状态都在这里，换容器不用重新登录
       - /var/lib/fanout:/var/lib/fanout
 
     # 想从源码构建，就把上面的 image: 换成这一行

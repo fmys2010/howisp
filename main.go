@@ -25,6 +25,7 @@ func main() {
 	)
 	publicIP := flag.String("ip", "", "母机公网 IPv4，用于 SOCKS5 地址；留空则自动探测")
 	showVersion := flag.Bool("version", false, "显示版本后退出")
+	showLink := flag.Bool("link", false, "打印管理界面的登录链接后退出")
 	flag.Parse()
 
 	if *publicIP == "" {
@@ -35,6 +36,15 @@ func main() {
 		fmt.Println("fanout", version)
 		return
 	}
+	if *showLink {
+		link, err := loginLink(*workDir, *publicIP)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		fmt.Println(link)
+		return
+	}
 
 	if os.Geteuid() != 0 {
 		log.Fatal("需要 root 权限（要创建 netns 和改 iptables）")
@@ -42,6 +52,7 @@ func main() {
 	if err := os.MkdirAll(*workDir, 0700); err != nil {
 		log.Fatalf("创建工作目录失败: %v", err)
 	}
+	syncMenuScript()
 
 	// 先记下母机的网络命名空间，后面所有子进程都从这里起。
 	// 必须赶在建任何隧道之前，那之后线程就可能被带进隧道里了
@@ -116,18 +127,10 @@ func main() {
 
 	auth, created, err := NewAuth(*workDir)
 	if err != nil {
-		log.Fatalf("初始化访问口令失败: %v", err)
+		log.Fatalf("初始化登录密钥失败: %v", err)
 	}
 	if created {
-		log.Printf("已生成访问口令，见 %s", filepath.Join(*workDir, "password"))
-	}
-
-	bpCreated, err := initBasePath(*workDir)
-	if err != nil {
-		log.Fatalf("初始化访问路径失败: %v", err)
-	}
-	if bpCreated {
-		log.Printf("已生成访问路径，见 %s", filepath.Join(*workDir, "basepath"))
+		log.Printf("已生成登录密钥，见 %s", filepath.Join(*workDir, keyFile))
 	}
 
 	// 用户显式给了 -web 就以命令行为准，否则沿用界面上存过的端口
@@ -142,13 +145,14 @@ func main() {
 		log.Fatalf("加载 Web 设置失败: %v", err)
 	}
 
-	srv := newWebServer(StripBasePath(auth.Wrap(mux)))
-	// 设置面板：改密码 / 改路径 / 改端口 / 改本地监听
+	srv := newWebServer(auth.Wrap(mux))
+	// 设置面板：改端口 / 改本地监听 / 功能开关；登录链接在这里看和重置
 	mux.HandleFunc("/api/settings", apiSettings(auth, srv))
+	mux.HandleFunc("/api/key/reset", apiKeyReset(auth))
 	mux.HandleFunc("/api/update/check", apiUpdateCheck)
 	mux.HandleFunc("/api/update/apply", apiUpdateApply)
 
-	log.Printf("管理界面: http://<本机IP>%s%s/", webCfg.listenAddrString(), currentBasePath())
+	log.Printf("管理界面监听 %s，登录链接用 f info 或 fanout -link 查看", webCfg.listenAddrString())
 	log.Printf("代理端口（SOCKS5 / HTTP）在 %d-%d 之间随机分配", randPortMin, randPortMax)
 	if err := srv.serve(); err != nil {
 		log.Fatal(err)
@@ -298,12 +302,11 @@ func apiCred(m *Manager) http.HandlerFunc {
 	}
 }
 
-// apiSettings 管理界面自身的设置：改密码 / 改路径 / 改端口 / 改本地监听。
-// GET 返回当前值（不含明文口令）；POST 按传入的字段逐项应用，任一项失败即整体回报。
+// apiSettings 管理界面自身的设置：改端口 / 改本地监听 / 功能开关。
+// GET 返回当前值和登录密钥（能调到这里的已经登录了，给它看链接好去别的设备登录）；
+// POST 按传入的字段逐项应用，任一项失败即整体回报。
 func apiSettings(auth *Auth, srv *webServer) http.HandlerFunc {
 	type settingsReq struct {
-		Password        *string `json:"password"`         // 非空则改口令
-		BasePath        *string `json:"base_path"`        // 提供即改访问路径（空串=去掉前缀）
 		Port            *int    `json:"port"`             // 提供即改监听端口
 		ListenAddr      *string `json:"listen_addr"`      // 提供即改监听地址
 		ResidentialOnly *bool   `json:"residential_only"` // 提供即改"只用家宽"
@@ -316,20 +319,6 @@ func apiSettings(auth *Auth, srv *webServer) http.HandlerFunc {
 				return
 			}
 
-			// 改口令
-			if in.Password != nil && *in.Password != "" {
-				if err := auth.SetPassword(*in.Password); err != nil {
-					writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
-					return
-				}
-			}
-			// 改访问路径
-			if in.BasePath != nil {
-				if _, err := setBasePath(*in.BasePath); err != nil {
-					writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
-					return
-				}
-			}
 			// 改"只用家宽"。放在改端口之前：applyWebSettings 会整份覆盖设置，
 			// 顺序颠倒会把这个开关写回旧值。
 			if in.ResidentialOnly != nil {
@@ -360,13 +349,34 @@ func apiSettings(auth *Auth, srv *webServer) http.HandlerFunc {
 			listen = "0.0.0.0"
 		}
 		writeJSON(w, http.StatusOK, map[string]any{
-			"base_path":        currentBasePath(),
+			"login_key":        auth.Key(),
 			"port":             cfg.Port,
 			"listen_addr":      listen,
-			"has_password":     true,
 			"residential_only": cfg.residentialOnly(),
 			"version":          version,
 		})
+	}
+}
+
+// apiKeyReset 换一个登录密钥：所有设备的登录一起失效，只给当前这个浏览器发新 cookie，
+// 免得重置的人自己也被踢出去。
+func apiKeyReset(auth *Auth) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "用 POST"})
+			return
+		}
+		key, err := auth.ResetKey()
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			return
+		}
+		if err := auth.issueCookie(w); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			return
+		}
+		log.Printf("登录密钥已重置，其他设备需要用新链接重新登录")
+		writeJSON(w, http.StatusOK, map[string]string{"login_key": key})
 	}
 }
 

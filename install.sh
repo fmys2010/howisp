@@ -248,25 +248,18 @@ svc_is_active && echo "      服务运行中（${INIT_SYS}）" || {
   exit 1
 }
 
-# 口令与访问路径由 fanout 首次启动时生成，等它写出来
+# 登录密钥由 fanout 首次启动时生成，等它写出来
 for _ in $(seq 1 10); do
-  [[ -s "${WORK_DIR}/password" && -s "${WORK_DIR}/basepath" ]] && break
+  [[ -s "${WORK_DIR}/key" ]] && break
   sleep 1
 done
 
-IP=$(curl -s --max-time 8 http://api.ipify.org || echo "<本机IP>")
-BP=$(cat "${WORK_DIR}/basepath" 2>/dev/null || true)
-# 以配置里的实际端口为准报地址，别让提示和真实监听对不上
-ACTUAL_PORT=$(sed -n 's/.*"port"[[:space:]]*:[[:space:]]*\([0-9]*\).*/\1/p' \
-  "${WORK_DIR}/settings.json" 2>/dev/null | head -1)
-[[ -n $ACTUAL_PORT ]] && WEB_PORT="$ACTUAL_PORT"
+# 链接（地址、端口、密钥）由程序自己拼，和 f info 打印的是同一条
 echo
-echo "  管理界面  http://${IP}:${WEB_PORT}/${BP}/"
-echo "  访问口令  $(cat "${WORK_DIR}/password" 2>/dev/null || echo "见 ${WORK_DIR}/password")"
+echo "  登录链接  $("$BIN" -link -dir "$WORK_DIR" 2>&1)"
 echo
-echo "  路径和口令都是随机生成的，也可以随时查看："
-echo "    cat ${WORK_DIR}/basepath"
-echo "    cat ${WORK_DIR}/password"
+echo "  打开一次就记住登录（30 天，常用会自动续期）。链接就是钥匙，别发给别人；"
+echo "  随时可以用 f info 再看，用 f 菜单里的「重置登录链接」作废旧链接。"
 echo
 echo "  输入 f 打开管理菜单"
 echo

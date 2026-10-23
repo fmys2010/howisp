@@ -33,7 +33,7 @@ RUN apt-get update \
 
 COPY --from=build /out/fanout /usr/local/bin/fanout
 
-# 状态、口令、访问路径都放这里，挂出来才能在重建容器后接着用
+# 状态和登录密钥都放这里，挂出来才能在重建容器后接着用
 VOLUME /var/lib/fanout
 EXPOSE 8899
 
