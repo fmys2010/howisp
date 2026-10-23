@@ -33,6 +33,9 @@ func (p persistedTunnel) node(known map[string]Node) Node {
 		// Psiphon 出口只认地区，服务器由 psiphon 自己从 datastore 里接着用
 		return psiphonNode(p.CountryCode)
 	}
+	if p.Provider == providerWarp {
+		return warpNode()
+	}
 	node, ok := known[p.HostName]
 	if !ok {
 		// 节点已从 VPN Gate 列表消失，用存盘的信息重建

@@ -2,13 +2,13 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-多出口代理网关：把 [VPN Gate](https://www.vpngate.net/) 的公共节点和 [Psiphon](https://psiphon.ca/)
-变成本机的代理端口，**一个端口一个出口 IP**。
+多出口代理网关：把 [VPN Gate](https://www.vpngate.net/) 的公共节点、[Psiphon](https://psiphon.ca/)
+和 [Cloudflare WARP](https://one.one.one.one/) 变成本机的代理端口，**一个端口一个出口 IP**。
 
 每个端口都是混合端口，SOCKS5 和 HTTP 代理两种协议都收；客户端连哪个端口，就从哪个国家出去。
 网页管理界面带世界地图，并显示每个出口 IP 的质量（风险系数、家宽/机房、原生/广播）。
 
-- **两种出口**：VPN Gate（OpenVPN，TCP + UDP）和 Psiphon（仅 TCP），可以混着开
+- **三种出口**：VPN Gate（OpenVPN，TCP + UDP）、Psiphon（仅 TCP）、Cloudflare WARP（仅 TCP，最多一个），可以混着开
 - **互不干扰**：母机自己的网络和 IP 不受影响，出口之间也互不影响
 - **端口稳定**：换节点、掉线重连，端口和口令都不变，已分发的客户端配置继续可用
 - **登录简单**：一条登录链接 + 30 天 cookie，没有登录页可爆破
@@ -37,6 +37,15 @@ VPN 的路由劫持只影响自己的 netns，不会切断母机的网络；多�
 
 ```
 客户端 ──> 母机混合端口 :随机端口 ──> 127.0.0.1:psiphon 本地端口 ──> Psiphon 服务器
+```
+
+### Cloudflare WARP 出口
+
+用官方 `warp-cli` / `warp-svc`，跑在**代理模式**下：只在 `127.0.0.1:40000` 开一个本地 SOCKS5 端口，
+不建 tun、不改路由，母机网络不受影响。母机的混合端口收到连接后，转手经这个本地端口出去：
+
+```
+客户端 ──> 母机混合端口 :随机端口 ──> 127.0.0.1:40000 (warp-svc) ──> Cloudflare WARP
 ```
 
 ### 端口协议
@@ -198,6 +207,30 @@ Environment=FANOUT_PSIPHON_BIN=/usr/local/bin/psiphon-tunnel-core
 # Docker：docker run 加 -e FANOUT_PSIPHON_BIN=...，并把文件挂进容器
 ```
 
+### Cloudflare WARP 出口
+
+新建出口时把「出口来源」切到 **Cloudflare WARP**，点开始即可，不用选地区和数量。和另外两种不同的地方：
+
+- **最多一个**。`warp-svc` 整台机器只有一个，本地端口也固定，所以只能开一条；已经有了就得先停掉再开。
+- **只转 TCP**。代理模式没有 UDP，SOCKS5 的 UDP ASSOCIATE 会直接回「命令不支持」。要 UDP 请用 VPN Gate 出口。
+- **地区不能选**。出口是 Cloudflare 的 IP，落在哪个城市取决于母机的位置。
+- **换节点**会丢掉当前的设备身份、重新向 Cloudflare 注册，可能拿到另一个出口 IP，也可能还是同一个，
+  同 IP 最多重试 3 次，之后就用着。
+- 域名交给 WARP 解析，母机上不发 DNS 查询。
+- 出口 IP 可能随 WARP 重连而变；健康检查只看能不能出网，IP 变了就更新界面。
+
+**官方包按需安装**：第一次开 WARP 出口时，如果没有 `warp-cli`，程序会从 Cloudflare 官方软件源
+（`pkg.cloudflareclient.com`）安装 `cloudflare-warp`，认 Debian / Ubuntu（apt）和 RHEL 系（dnf / yum），
+支持 amd64 / arm64。其他发行版（比如 Alpine）请先自己装好官方客户端。
+装完之后的 `warp-svc`：系统服务（systemd）起着就直接用；没有 systemd（容器、OpenRC）就由程序自己拉起，
+停掉出口时一并收掉。
+
+注册、模式和端口都由程序设置：先切 `mode proxy` 再连接，**不会**像默认的 warp 模式那样接管整机路由
+（那样远程机器的 SSH 会断）。设备注册信息由官方客户端保存在 `/var/lib/cloudflare-warp/`。
+Docker 里这个目录不在数据卷里，重建容器后会重新安装、重新注册（出口 IP 可能变），想保留就把它也挂出来。
+
+使用 WARP 须遵守 [Cloudflare 的条款](https://www.cloudflare.com/application/terms/)。
+
 ## 运维
 
 装完后敲 `f` 打开管理菜单：启停、看日志、查隧道、看登录链接、改端口、卸载。
@@ -249,6 +282,7 @@ Psiphon 出口只检查能不能出网。
 - 换节点会避开这条出口之前用过的节点（最多记 16 个），同地区都换过一轮后从头开始。
   一个地区只有一个可用节点时换不动，界面会直接说明原因。
 - Psiphon 出口只转 TCP、出口 IP 不固定，官方客户端只有 x86_64，详见上文 [Psiphon 出口](#psiphon-出口)。
+- WARP 出口最多一个、只转 TCP、地区不能选，详见上文 [Cloudflare WARP 出口](#cloudflare-warp-出口-1)。
 - IP 质量来自 IPPure 的测试版接口，字段和可用性可能变化；风险分档仅供参考。
 
 ## 许可与致谢

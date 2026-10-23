@@ -274,6 +274,11 @@ func apiRegions(m *Manager) http.HandlerFunc {
 			writeJSON(w, http.StatusOK, m.PsiphonRegions())
 			return
 		}
+		if r.URL.Query().Get("provider") == providerWarp {
+			// WARP 不分地区
+			writeJSON(w, http.StatusOK, []RegionStat{})
+			return
+		}
 		writeJSON(w, http.StatusOK, m.Regions())
 	}
 }

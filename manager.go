@@ -89,6 +89,15 @@ func (m *Manager) freeSlot() (int, error) {
 // Start 为指定节点开一条隧道，返回分配到的本地端口。
 func (m *Manager) Start(node Node) (*Tunnel, error) {
 	m.mu.Lock()
+	// warp-svc 整机只有一个，WARP 出口最多一条。在持锁时查，并发新建也不会开出两条
+	if node.isWarp() {
+		for _, other := range m.tunnels {
+			if other.isWarp() {
+				m.mu.Unlock()
+				return nil, errWarpExists
+			}
+		}
+	}
 	slot, err := m.freeSlot()
 	if err != nil {
 		m.mu.Unlock()
@@ -168,8 +177,11 @@ func (m *Manager) bringUpPersist(t *Tunnel, persist bool) {
 		// 是自己缺依赖、节点全挂还是网络不通。
 		psiphon := t.isPsiphon()
 		what := "暂无可用节点"
-		if psiphon {
+		switch {
+		case psiphon:
 			what = "Psiphon 没连上"
+		case t.isWarp():
+			what = "WARP 没连上"
 		}
 		t.setState("starting", fmt.Sprintf("%s，%.0f 秒后重试（最后错误：%s）",
 			what, backoff.Seconds(), shortErr(t.errOf())))
@@ -179,7 +191,7 @@ func (m *Manager) bringUpPersist(t *Tunnel, persist bool) {
 			return
 		}
 		// VPN Gate 的死节点多，重试前刷新一下列表；Psiphon 的服务器它自己会拉
-		if !psiphon {
+		if !psiphon && !t.isWarp() {
 			if _, err := m.RefreshNodes(); err != nil {
 				log.Printf("重试前刷新节点列表失败: %v", err)
 			}
@@ -201,6 +213,9 @@ func (m *Manager) bringUpPersist(t *Tunnel, persist bool) {
 func (m *Manager) tryCandidates(t *Tunnel) bool {
 	if t.isPsiphon() {
 		return m.tryPsiphon(t)
+	}
+	if t.isWarp() {
+		return m.tryWarp(t)
 	}
 	candidates := m.candidatesFor(t)
 	for i, node := range candidates {
@@ -265,6 +280,56 @@ func (m *Manager) tryPsiphon(t *Tunnel) bool {
 		}
 		return true
 	}
+}
+
+// tryWarp 拉起 WARP 出口，成功返回 true。
+//
+// 和 tryPsiphon 一个思路：没有候选节点可轮，只有换节点时要管——
+// 重新注册后分到换过的 IP 就再来，最多 warpSwapTries 次，之后先用着。
+func (m *Manager) tryWarp(t *Tunnel) bool {
+	for attempt := 1; ; attempt++ {
+		if !m.tunnelActive(t) {
+			return false
+		}
+		if err := m.tryWarpOnce(t); err != nil {
+			log.Printf("隧道 %d 连接 WARP 失败: %v", t.Slot, err)
+			t.setError(shortErr(err.Error()))
+			t.killWarp()
+			return false
+		}
+		ip := t.exitIPOf()
+		if attempt < warpSwapTries && t.swapAvoid()[ip] {
+			log.Printf("隧道 %d 的 WARP 又分到了换过的 IP %s，重新注册", t.Slot, ip)
+			t.killWarp()
+			t.setExitIP("")
+			t.markFresh()
+			t.setState("starting", "又分到了换过的 IP "+ip+"，重新注册")
+			continue
+		}
+		t.markUp()
+		if serr := m.saveState(); serr != nil {
+			log.Printf("保存状态失败: %v", serr)
+		}
+		return true
+	}
+}
+
+// tryWarpOnce 连一次 WARP，连通后建监听、探出口 IP。
+func (m *Manager) tryWarpOnce(t *Tunnel) error {
+	if err := t.startWarp(m.workDir); err != nil {
+		return err
+	}
+	if !t.serving() {
+		if err := t.serve(); err != nil {
+			return err
+		}
+	}
+	ip, err := t.probeExitIP()
+	if err != nil {
+		return err
+	}
+	t.setExitIP(ip)
+	return nil
 }
 
 // tryPsiphonOnce 起一次 psiphon，连通后建监听、探出口 IP。
@@ -412,8 +477,8 @@ func (m *Manager) Swap(slot int) error {
 		return fmt.Errorf("这个出口正在连接中，稍等一下")
 	}
 
-	if t.isPsiphon() {
-		// Psiphon 没有节点可挑，换节点就是让它忘掉当前服务器重新挑；
+	if t.isPsiphon() || t.isWarp() {
+		// Psiphon/WARP 没有节点可挑，换节点就是让它忘掉当前服务器（或设备身份）重新来；
 		// 当前 IP 记进历史，重新挑出来还是它的话 tryPsiphon 会再换
 		t.rememberSwap(t.exitIPOf())
 		t.markFresh()

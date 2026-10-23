@@ -26,7 +26,8 @@ func (m *Manager) Provision(req ProvisionRequest) (*Job, error) {
 		return nil, fmt.Errorf("数量至少为 1")
 	}
 	psiphon := req.Provider == providerPsiphon
-	if req.Provider != "" && !psiphon {
+	warp := req.Provider == providerWarp
+	if req.Provider != "" && !psiphon && !warp {
 		return nil, fmt.Errorf("不认识的出口来源 %q", req.Provider)
 	}
 	if psiphon {
@@ -34,9 +35,16 @@ func (m *Manager) Provision(req ProvisionRequest) (*Job, error) {
 			return nil, err
 		}
 	}
+	if warp {
+		if err := warpSupported(); err != nil {
+			return nil, err
+		}
+	}
 	var picks []Node
 	var err error
 	switch {
+	case warp:
+		picks, err = m.pickWarp(req.Count, req.EveryRegion)
 	case psiphon:
 		picks, err = m.pickPsiphon(req.Region, req.Count, req.EveryRegion)
 	case req.EveryRegion:
@@ -59,6 +67,8 @@ func (m *Manager) Provision(req ProvisionRequest) (*Job, error) {
 	}
 	title := ""
 	switch {
+	case warp:
+		title = "开 1 个 Cloudflare WARP 出口"
 	case req.EveryRegion:
 		title = fmt.Sprintf("每个国家开 %d 个，共 %d 条%s出口", req.Count, len(picks), kind)
 	case req.Region != "":
@@ -83,8 +93,11 @@ func (m *Manager) runProvision(job *Job, picks []Node) {
 			continue
 		}
 		target := node.HostName
-		if node.isPsiphon() {
+		switch {
+		case node.isPsiphon():
 			target = "Psiphon"
+		case node.isWarp():
+			target = "Cloudflare WARP"
 		}
 		job.Set(i, "running", "正在连接 "+target)
 
@@ -250,6 +263,27 @@ func (m *Manager) pickPsiphon(region string, count int, every bool) ([]Node, err
 	return out, nil
 }
 
+// errWarpExists 是已经有一条 WARP 出口时再开第二条的错误。
+var errWarpExists = fmt.Errorf("WARP 出口最多一个，已经有一条了")
+
+// pickWarp 给 WARP 出口凑目标：永远只有一个，已经有了或槽位满了就报错。
+func (m *Manager) pickWarp(count int, every bool) ([]Node, error) {
+	if count > 1 || every {
+		return nil, fmt.Errorf("WARP 出口最多一个，不能开 %d 个", max(count, 2))
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	for _, t := range m.tunnels {
+		if t.isWarp() {
+			return nil, errWarpExists
+		}
+	}
+	if len(m.tunnels) >= m.maxSlots {
+		return nil, fmt.Errorf("槽位已满（上限 %d），先停几个出口再来", m.maxSlots)
+	}
+	return []Node{warpNode()}, nil
+}
+
 // noNodesErrLocked 拼一句能照着做的错误。调用方必须已持 m.mu。
 //
 // 挑不到节点有好几种原因，报一句笼统的"没有可用节点"会让人无从下手：
@@ -355,6 +389,9 @@ func (m *Manager) PsiphonRegions() []RegionStat {
 
 // regionLabel 给出口起一个人能读的名字。
 func regionLabel(n Node) string {
+	if n.isWarp() {
+		return warpLabel
+	}
 	if n.isPsiphon() {
 		return psiphonRegionText(n) + " · Psiphon"
 	}
