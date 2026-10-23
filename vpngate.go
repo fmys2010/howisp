@@ -57,6 +57,9 @@ type Node struct {
 // isPsiphon 判断这是不是 Psiphon 出口。
 func (n Node) isPsiphon() bool { return n.Provider == providerPsiphon }
 
+// isWarp 判断这是不是 Cloudflare WARP 出口。
+func (n Node) isWarp() bool { return n.Provider == providerWarp }
+
 // vpngate 自营服务器所在的网段。这些是学术网络里的机房机器，
 // 不是志愿者家宽：出口 IP 一眼能看出来是数据中心，而且更容易满员。
 var vpngateOwnNets = []string{"219.100.37.0/24"}

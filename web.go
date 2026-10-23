@@ -32,7 +32,7 @@ const indexHTML = `<!DOCTYPE html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>fanout</title>
+<title>howisp</title>
 <style>
 :root{
   --bg:#0c1016; --panel:#131921; --panel2:#171e28; --line:#222b37; --line2:#2c3746;
@@ -146,6 +146,7 @@ main{padding:18px 20px 48px;max-width:1240px;margin:0 auto}
 .tag{display:inline-flex;align-items:center;font-size:10.5px;line-height:1;padding:3px 6px;
   border-radius:4px;border:1px solid var(--line2);color:var(--dim);font-family:var(--sans);font-weight:500}
 .tag.src{border-color:rgba(214,162,62,.45);color:var(--warn)}
+.tag.warp{border-color:rgba(244,129,32,.5);color:#f48120;background:rgba(244,129,32,.1)}
 .tag.good{border-color:rgba(63,178,127,.45);color:var(--ok);background:var(--ok-w)}
 .tag.meh{border-color:rgba(214,162,62,.45);color:var(--warn);background:var(--warn-w)}
 .qline{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
@@ -289,7 +290,7 @@ button.danger:hover:not(:disabled){border-color:var(--bad);background:var(--bad-
 <header>
   <div class="brand">
     <svg viewBox="0 0 24 24"><circle cx="5" cy="12" r="2"/><path d="M7 12h4"/><path d="M11 12 19 5"/><path d="M11 12h8"/><path d="m11 12 8 7"/></svg>
-    <h1>fanout</h1>
+    <h1>howisp</h1>
   </div>
   <span class="pill" id="nodecount" title="VPN Gate 节点数（可用 / 全部）"></span>
   <span class="spacer"></span>
@@ -301,10 +302,7 @@ button.danger:hover:not(:disabled){border-color:var(--bad);background:var(--bad-
     <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
   </button>
   <nav class="links">
-    <a href="https://t.me/+ft-zI76oovgwNmRh" target="_blank" rel="noopener">交流群</a>
-    <a href="https://youtube.com/@joeyblog" target="_blank" rel="noopener">油管</a>
-    <a href="https://joeyblog.net" target="_blank" rel="noopener">博客</a>
-    <a href="https://github.com/byJoey/fanout" target="_blank" rel="noopener">GitHub</a>
+    <a href="https://github.com/fmys2010/howisp" target="_blank" rel="noopener">GitHub</a>
   </nav>
 </header>
 
@@ -362,15 +360,16 @@ button.danger:hover:not(:disabled){border-color:var(--bad);background:var(--bad-
         <div class="seg" id="pvseg">
           <button data-pv="">VPN Gate</button>
           <button data-pv="psiphon">Psiphon</button>
+          <button data-pv="warp">Cloudflare WARP</button>
         </div>
         <div class="hint" id="pvhint"></div>
       </div>
-      <label class="f">
+      <label class="f" id="rgbox">
         <span>地区</span>
         <input type="search" id="rgfilter" placeholder="筛选地区">
         <div class="regions" id="regions" style="margin-top:7px"></div>
       </label>
-      <label class="f">
+      <label class="f" id="countbox">
         <span id="countlabel">数量</span>
         <div class="stepper">
           <button id="minus" title="减少">
@@ -728,7 +727,7 @@ svgMap.addEventListener('pointerover', ev => {
     showTip(pin, '<div class="t mono">' + esc(e.exit_ip || STATUS[e.status] || e.status) + '</div>'
       + '<div class="r">' + esc(placeText(e)) + '</div>'
       + (i ? '<div class="r">' + esc(asnText(i)) + '</div><div style="margin-top:5px">' + riskHTML(i) + '</div>' : '')
-      + '<div class="r mono" style="margin-top:4px">:' + e.port + (e.provider === 'psiphon' ? ' · Psiphon' : '') + '</div>');
+      + '<div class="r mono" style="margin-top:4px">:' + e.port + (e.provider === 'psiphon' ? ' · Psiphon' : e.provider === 'warp' ? ' · WARP' : '') + '</div>');
     highlight(e.slot, true);
     return;
   }
@@ -808,10 +807,12 @@ function renderExits(){
     // starting 时后端会把"N 秒后重试（最后错误）"写在 err 里，也值得看到
     const err = (e.status === 'failed' || e.status === 'starting') && e.err
       ? '<div class="errline' + (e.status === 'starting' ? ' note' : '') + '" title="' + esc(e.err) + '">' + esc(e.err) + '</div>' : '';
-    const psi = e.provider === 'psiphon';
-    const src = '<span class="tag' + (psi ? ' src' : '') + '" title="'
-      + (psi ? 'Psiphon 出口：服务器由 Psiphon 自动挑，IP 可能随重连变化，只转 TCP' : 'VPN Gate 志愿者节点：' + esc(e.host))
-      + '">' + (psi ? 'Psiphon' : 'VPN Gate') + '</span>';
+    const psi = e.provider === 'psiphon', warp = e.provider === 'warp';
+    const src = '<span class="tag' + (psi ? ' src' : warp ? ' warp' : '') + '" title="'
+      + (psi ? 'Psiphon 出口：服务器由 Psiphon 自动挑，IP 可能随重连变化，只转 TCP'
+        : warp ? 'Cloudflare WARP（官方客户端代理模式）：出口是 Cloudflare 的 IP，只转 TCP'
+        : 'VPN Gate 志愿者节点：' + esc(e.host))
+      + '">' + (psi ? 'Psiphon' : warp ? 'WARP' : 'VPN Gate') + '</span>';
     const url = socksURL(credHost(e), e.port, e.socks_user, e.socks_pass);
     const i = e.ipinfo;
     let q;
@@ -836,7 +837,7 @@ function renderExits(){
       +   '</div></div>'
       +   '<div class="acts">'
       +     '<button class="icon" data-iq="' + e.slot + '" title="重新查询 IP 质量"' + (e.status === 'up' ? '' : ' disabled') + '>' + ICON.gauge + '</button>'
-      +     '<button class="icon" data-swap="' + e.slot + '" title="' + (psi ? '换一个出口 IP（让 Psiphon 重新挑服务器）' : '换一个节点') + '">' + ICON.redo + '</button>'
+      +     '<button class="icon" data-swap="' + e.slot + '" title="' + (psi ? '换一个出口 IP（让 Psiphon 重新挑服务器）' : warp ? '换一个出口 IP（重新注册 WARP 设备）' : '换一个节点') + '">' + ICON.redo + '</button>'
       +     '<button class="icon danger" data-stop="' + e.slot + '" title="停止这个出口">' + ICON.stop + '</button>'
       +   '</div>'
       + '</div>' + err + '</div>';
@@ -885,8 +886,10 @@ async function poll(){
 let regions = [], region = '', provider = '';
 const PVHINT = {
   '': 'VPN Gate 志愿者节点，一条出口钉一个节点，支持 UDP。',
-  psiphon: 'Psiphon 机房出口：服务器由 Psiphon 在地区内自动挑，IP 可能随重连变化；只转 TCP，域名在远端解析。首次使用会下载 psiphon-tunnel-core（仅 x86_64）。'
+  psiphon: 'Psiphon 机房出口：服务器由 Psiphon 在地区内自动挑，IP 可能随重连变化；只转 TCP，域名在远端解析。首次使用会下载 psiphon-tunnel-core（仅 x86_64）。',
+  warp: 'Cloudflare WARP：官方客户端的代理模式，出口是 Cloudflare 的 IP，地区跟着本机走、不能选；只转 TCP。最多一个。首次使用会从 Cloudflare 官方软件源安装 cloudflare-warp。'
 };
+const hasWarp = () => !!(view && view.exits && view.exits.some(e => e.provider === 'warp'));
 
 function openModal(id){ $('#' + id).classList.add('open'); }
 function closeModal(id){ $('#' + id).classList.remove('open'); }
@@ -911,6 +914,16 @@ function renderRegions(){
   document.querySelectorAll('#pvseg [data-pv]').forEach(b =>
     b.classList.toggle('sel', b.dataset.pv === provider));
   $('#pvhint').textContent = PVHINT[provider] || '';
+  // WARP 不选地区也不选数量：只有一个
+  const warp = provider === 'warp';
+  $('#rgbox').hidden = warp;
+  $('#countbox').hidden = warp;
+  if(warp){
+    $('#go').disabled = hasWarp();
+    $('#wzhint').textContent = hasWarp() ? '已经有一条 WARP 出口，先停掉再开' : '';
+    return;
+  }
+  $('#wzhint').textContent = '';
   $('#regions').innerHTML = ['<button class="rg' + (region === '' ? ' sel' : '')
       + '" data-rg=""><b>不限地区</b><em>' + (psi ? '由 Psiphon 挑最快的' : '速度优先') + '</em></button>',
     '<button class="rg' + (region === '*' ? ' sel' : '')
@@ -964,6 +977,7 @@ function updateAvail(){
 }
 
 async function loadWizard(){
+  if(provider === 'warp'){ regions = []; renderRegions(); return; }
   try{
     regions = await api('/api/regions' + (provider ? '?provider=' + provider : '')) || [];
     renderRegions();
@@ -1005,10 +1019,12 @@ $('#count').oninput = updateAvail;
 
 $('#go').onclick = async e => {
   const btn = e.currentTarget;
-  const want = Math.min(Number($('#count').value) || 1, availOf(region) || 1);
+  const warp = provider === 'warp';
+  const want = warp ? 1 : Math.min(Number($('#count').value) || 1, availOf(region) || 1);
   btn.disabled = true;
   try{
-    await api('/api/provision?count=' + want
+    if(warp) await api('/api/provision?count=1&provider=warp', {method:'POST'});
+    else await api('/api/provision?count=' + want
       + (provider ? '&provider=' + provider : '')
       + (region === '*' ? '&every=1' : '&region=' + encodeURIComponent(region)), {method:'POST'});
     closeModal('wizard');
@@ -1107,7 +1123,8 @@ function openCred(slot){
   const e = view.exits.find(x => x.slot === slot);
   if(!e){ toast('这个出口不在了', true); return; }
   curCred = {slot: slot, port: e.port, host: credHost(e)};
-  $('#crnote').textContent = e.provider === 'psiphon' ? '（Psiphon 出口只转 TCP，SOCKS5 的 UDP 不可用）' : '';
+  $('#crnote').textContent = e.provider === 'psiphon' ? '（Psiphon 出口只转 TCP，SOCKS5 的 UDP 不可用）'
+    : e.provider === 'warp' ? '（WARP 出口只转 TCP，SOCKS5 的 UDP 不可用）' : '';
   $('#crtitle').textContent = (e.country || e.region) + ' · :' + e.port;
   $('#cruser').value = e.socks_user || '';
   $('#crpass').value = e.socks_pass || '';

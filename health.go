@@ -51,6 +51,9 @@ func (m *Manager) tunnelHealthy(t *Tunnel) bool {
 	if t.isPsiphon() {
 		return m.psiphonHealthy(t)
 	}
+	if t.isWarp() {
+		return m.warpHealthy(t)
+	}
 	out, err := cmdOutput(exec.Command("ip", "netns", "exec", t.nsName(),
 		"curl", "-s", "--max-time", strconv.Itoa(int(healthTimeout.Seconds())),
 		"http://api.ipify.org"))
@@ -78,6 +81,19 @@ func (m *Manager) psiphonHealthy(t *Tunnel) bool {
 	}
 	if old := t.exitIPOf(); ip != old {
 		log.Printf("隧道 %d 的 Psiphon 换了服务器，出口 IP %s -> %s", t.Slot, old, ip)
+		t.setExitIP(ip)
+	}
+	return true
+}
+
+// warpHealthy 判断 WARP 出口还通不通。和 Psiphon 一样只看能不能出网，IP 变了就更新显示。
+func (m *Manager) warpHealthy(t *Tunnel) bool {
+	ip, err := probeExitIPVia(t.warpDial, healthTimeout)
+	if err != nil {
+		return false
+	}
+	if old := t.exitIPOf(); ip != old {
+		log.Printf("隧道 %d 的 WARP 出口 IP %s -> %s", t.Slot, old, ip)
 		t.setExitIP(ip)
 	}
 	return true

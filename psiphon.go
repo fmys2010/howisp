@@ -584,6 +584,11 @@ func (t *Tunnel) psiphonDial(network, addr string) (net.Conn, error) {
 	if port == 0 {
 		return nil, fmt.Errorf("Psiphon 还没连上")
 	}
+	return dialLocalSocks(port, addr)
+}
+
+// dialLocalSocks 经母机 127.0.0.1:port 上的本地 SOCKS5 代理（psiphon、warp-svc）连到 addr。
+func dialLocalSocks(port int, addr string) (net.Conn, error) {
 	var conn net.Conn
 	// 只有建 socket 这一步要在母机命名空间里做：线程要是被某条隧道带进了它的 netns，
 	// 连 127.0.0.1 连到的就是那个 netns 的 loopback，psiphon 不在那里（见 netnsguard.go）
@@ -593,7 +598,7 @@ func (t *Tunnel) psiphonDial(network, addr string) (net.Conn, error) {
 		return err
 	})
 	if err != nil {
-		return nil, fmt.Errorf("连不上 psiphon 本地端口: %w", err)
+		return nil, fmt.Errorf("连不上本地代理端口 %d: %w", port, err)
 	}
 	if err := socks5ClientConnect(conn, addr, 30*time.Second); err != nil {
 		conn.Close()
@@ -653,7 +658,7 @@ func socks5ClientConnect(conn net.Conn, addr string, timeout time.Duration) erro
 		return fmt.Errorf("读 SOCKS5 应答失败: %w", err)
 	}
 	if head[1] != repSuccess {
-		return fmt.Errorf("psiphon 连接 %s 失败（SOCKS5 应答 %d）", addr, head[1])
+		return fmt.Errorf("上游代理连接 %s 失败（SOCKS5 应答 %d）", addr, head[1])
 	}
 	// 跳过应答里的绑定地址，后面就是目标的数据流了
 	var skip int

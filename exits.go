@@ -4,7 +4,7 @@ import "time"
 
 // Exit 是界面上的一行：一条隧道就是一个出口，对应一个 SOCKS5 端口。
 type Exit struct {
-	// Provider 是出口来源："vpngate" 或 "psiphon"
+	// Provider 是出口来源："vpngate"、"psiphon" 或 "warp"
 	Provider string    `json:"provider"`
 	Slot     int       `json:"slot"`
 	Port     int       `json:"port"` // SOCKS5 端口
@@ -36,8 +36,11 @@ func (m *Manager) ExitsOf() ExitsView {
 	view := ExitsView{Exits: []Exit{}, PublicIP: hostPublicIP(), HostInfo: m.HostIPInfo()}
 	for _, v := range m.Views() {
 		provider, country := "vpngate", nodeLabel(v.Node)
-		if v.Node.isPsiphon() {
+		switch {
+		case v.Node.isPsiphon():
 			provider, country = providerPsiphon, psiphonRegionText(v.Node)
+		case v.Node.isWarp():
+			provider, country = providerWarp, warpLabel
 		}
 		view.Exits = append(view.Exits, Exit{
 			Provider:  provider,

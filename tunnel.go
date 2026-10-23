@@ -103,6 +103,9 @@ func (t *Tunnel) errOf() string {
 // isPsiphon 判断这是不是 Psiphon 出口。出口的来源在创建时定下，换节点也不会变。
 func (t *Tunnel) isPsiphon() bool { return t.nodeOf().isPsiphon() }
 
+// isWarp 判断这是不是 Cloudflare WARP 出口。
+func (t *Tunnel) isWarp() bool { return t.nodeOf().isWarp() }
+
 func (t *Tunnel) setNode(n Node) {
 	t.mu.Lock()
 	t.node = n
@@ -460,6 +463,9 @@ func (t *Tunnel) outbound() (dialFunc, bool) {
 	if t.isPsiphon() {
 		return t.psiphonDial, false
 	}
+	if t.isWarp() {
+		return t.warpDial, false
+	}
 	return dialerInNetns(t.nsName()), true
 }
 
@@ -482,6 +488,9 @@ func (t *Tunnel) setCredential(c SocksCred) {
 func (t *Tunnel) probeExitIP() (string, error) {
 	if t.isPsiphon() {
 		return probeExitIPVia(t.psiphonDial, 15*time.Second)
+	}
+	if t.isWarp() {
+		return probeExitIPVia(t.warpDial, 15*time.Second)
 	}
 	out, err := cmdOutput(exec.Command("ip", "netns", "exec", t.nsName(),
 		"curl", "-s", "--max-time", "15", "http://api.ipify.org"))
@@ -513,7 +522,8 @@ func (t *Tunnel) killOpenVPN() {
 func (t *Tunnel) teardown() {
 	t.killOpenVPN()
 	t.killPsiphon()
-	if !t.isPsiphon() {
+	t.killWarp()
+	if !t.isPsiphon() && !t.isWarp() {
 		t.teardownNetns()
 	}
 }
@@ -528,4 +538,8 @@ func (t *Tunnel) stop() {
 	t.status = "stopped"
 	t.mu.Unlock()
 	t.teardown()
+	if t.isWarp() {
+		// 只有用户停掉（或程序退出）才连守护进程一起收；重连时留着它
+		stopWarpDaemon()
+	}
 }
