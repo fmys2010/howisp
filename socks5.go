@@ -39,7 +39,7 @@ const (
 //
 // r 是已经缓冲了首字节的读取器：握手和转发都必须从它读，直接读裸 conn
 // 会把缓冲区里已有的数据丢掉（混合端口预读的那一个字节就属于这种情况）。
-func serveSocks(client net.Conn, r io.Reader, cred *SocksCred, dial dialFunc) {
+func serveSocks(client net.Conn, r io.Reader, cred *SocksCred, dial dialFunc, udp bool) {
 	defer client.Close()
 	_ = client.SetDeadline(time.Now().Add(30 * time.Second))
 
@@ -58,6 +58,12 @@ func serveSocks(client net.Conn, r io.Reader, cred *SocksCred, dial dialFunc) {
 	}
 
 	if cmd == cmdUDPAssociate {
+		if !udp {
+			// Psiphon 出口只转 TCP。答应下来再把包全丢掉的话，客户端会以为 UDP 通着，
+			// 一直干等 DNS/QUIC 超时；直接回"不支持"，它会马上退回 TCP。
+			socksReply(client, repCmdNotSupp)
+			return
+		}
 		_ = client.SetDeadline(time.Time{})
 		serveUDPAssociate(client, dial)
 		return

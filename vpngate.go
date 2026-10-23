@@ -37,8 +37,11 @@ func mirrorAccessKey() string {
 	return mirrorKey
 }
 
-// Node 是一个 VPN Gate 节点。
+// Node 是一个 VPN Gate 节点，或者某地区的 Psiphon 出口（见 psiphonNode）。
 type Node struct {
+	// Provider 区分出口来源：空表示 VPN Gate（老状态文件里没有这个字段），
+	// "psiphon" 表示 Psiphon。
+	Provider    string  `json:"provider,omitempty"`
 	HostName    string  `json:"hostname"`
 	IP          string  `json:"ip"`
 	Country     string  `json:"country"`
@@ -50,6 +53,9 @@ type Node struct {
 	// Residential 表示这是志愿者的家庭宽带，不是 VPN Gate 自己的机房服务器。
 	Residential bool `json:"residential"`
 }
+
+// isPsiphon 判断这是不是 Psiphon 出口。
+func (n Node) isPsiphon() bool { return n.Provider == providerPsiphon }
 
 // vpngate 自营服务器所在的网段。这些是学术网络里的机房机器，
 // 不是志愿者家宽：出口 IP 一眼能看出来是数据中心，而且更容易满员。

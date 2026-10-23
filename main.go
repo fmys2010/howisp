@@ -261,8 +261,13 @@ func apiSwap(m *Manager) http.HandlerFunc {
 }
 
 // apiRegions 给新建向导用：各地区还剩多少空闲节点。
+// 带 provider=psiphon 时列 Psiphon 的出口地区。
 func apiRegions(m *Manager) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("provider") == providerPsiphon {
+			writeJSON(w, http.StatusOK, m.PsiphonRegions())
+			return
+		}
 		writeJSON(w, http.StatusOK, m.Regions())
 	}
 }
@@ -413,7 +418,8 @@ func apiProvision(m *Manager) http.HandlerFunc {
 			return
 		}
 		job, err := m.Provision(ProvisionRequest{
-			Region: q.Get("region"), Count: count,
+			Provider: q.Get("provider"),
+			Region:   q.Get("region"), Count: count,
 			EveryRegion: q.Get("every") == "1",
 		})
 		if err != nil {

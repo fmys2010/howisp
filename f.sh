@@ -317,6 +317,9 @@ do_uninstall() {
 
   svc_stop >/dev/null 2>&1
   svc_disable
+  # Psiphon 出口的进程正常会随服务一起退出；fanout 要是先崩了，它们会留下来
+  # 占着端口。按 datastore 目录认人，不会误伤同机别的 psiphon（比如 Linphon 起的）。
+  pkill -9 -f -- "-dataRootDirectory ${WORK_DIR}/psiphon/" 2>/dev/null
   # 清掉残留的 netns 与 veth。名字是 fo<实例标识><槽位>：实例标识是 4 位
   # 十六进制（默认工作目录下为空），槽位是十进制，所以按
   # ^fo[0-9a-f]*[0-9]$ 匹配，同机上多个实例留下的也一起收走。

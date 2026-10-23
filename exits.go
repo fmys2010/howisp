@@ -4,15 +4,17 @@ import "time"
 
 // Exit 是界面上的一行：一条隧道就是一个出口，对应一个 SOCKS5 端口。
 type Exit struct {
-	Slot    int       `json:"slot"`
-	Port    int       `json:"port"` // SOCKS5 端口
-	Host    string    `json:"host"`
-	Region  string    `json:"region"`
-	Country string    `json:"country"`
-	ExitIP  string    `json:"exit_ip"`
-	Status  string    `json:"status"`
-	Err     string    `json:"err,omitempty"`
-	Since   time.Time `json:"since"`
+	// Provider 是出口来源："vpngate" 或 "psiphon"
+	Provider string    `json:"provider"`
+	Slot     int       `json:"slot"`
+	Port     int       `json:"port"` // SOCKS5 端口
+	Host     string    `json:"host"`
+	Region   string    `json:"region"`
+	Country  string    `json:"country"`
+	ExitIP   string    `json:"exit_ip"`
+	Status   string    `json:"status"`
+	Err      string    `json:"err,omitempty"`
+	Since    time.Time `json:"since"`
 	// SOCKS5 凭据：界面要能看、能复制、能改
 	SocksUser string `json:"socks_user"`
 	SocksPass string `json:"socks_pass"`
@@ -29,12 +31,17 @@ type ExitsView struct {
 func (m *Manager) ExitsOf() ExitsView {
 	view := ExitsView{Exits: []Exit{}, PublicIP: hostPublicIP()}
 	for _, v := range m.Views() {
+		provider, country := "vpngate", nodeLabel(v.Node)
+		if v.Node.isPsiphon() {
+			provider, country = providerPsiphon, psiphonRegionText(v.Node)
+		}
 		view.Exits = append(view.Exits, Exit{
+			Provider:  provider,
 			Slot:      v.Slot,
 			Port:      v.Port,
 			Host:      v.Node.HostName,
 			Region:    v.Node.CountryCode,
-			Country:   nodeLabel(v.Node),
+			Country:   country,
 			ExitIP:    v.ExitIP,
 			Status:    v.Status,
 			Err:       v.Err,
