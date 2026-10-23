@@ -250,28 +250,30 @@ const loginHTML = `<!DOCTYPE html>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>fanout</title>
 <style>
-body{margin:0;height:100vh;display:flex;flex-direction:column;gap:16px;
-  align-items:center;justify-content:center;
-  background:#12151a;color:#dde3ec;
-  font:13px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+body{margin:0;min-height:100vh;display:flex;flex-direction:column;gap:18px;
+  align-items:center;justify-content:center;padding:16px;box-sizing:border-box;
+  background:radial-gradient(ellipse at 50% 30%,#121a26 0%,#0c1016 65%);color:#e2e8f0;
+  font:13px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif}
 .links{display:flex;gap:16px}
-.links a{color:#8b95a5;text-decoration:none;font-size:12px}
-.links a:hover{color:#4a9eda}
-form{background:#181c23;border:1px solid #262c36;border-radius:6px;
-  padding:22px 24px;width:300px}
-h1{font-size:13px;font-weight:600;margin:0 0 16px}
-label{display:block;color:#8b95a5;font-size:11px;margin-bottom:6px}
-input{width:100%;box-sizing:border-box;background:#0e1116;border:1px solid #262c36;
-  color:#dde3ec;border-radius:4px;padding:7px 9px;font:inherit}
-input:focus{outline:none;border-color:#4a9eda}
-button{width:100%;margin-top:14px;background:#4a9eda;border:0;color:#0b0e12;
-  font:inherit;font-weight:600;border-radius:4px;padding:8px;cursor:pointer}
-.err{color:#c25450;font-size:11px;margin-top:10px;min-height:14px}
+.links a{color:#8b97a8;text-decoration:none;font-size:12px}
+.links a:hover{color:#4c9fe6}
+form{background:#131921;border:1px solid #222b37;border-radius:12px;
+  padding:24px 26px;width:min(320px,100%);box-sizing:border-box;box-shadow:0 24px 60px rgba(0,0,0,.35)}
+h1{display:flex;align-items:center;gap:9px;font-size:16px;font-weight:650;margin:0 0 18px}
+h1 svg{width:20px;height:20px;stroke:#4c9fe6;fill:none;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
+label{display:block;color:#8b97a8;font-size:11.5px;margin-bottom:7px}
+input{width:100%;box-sizing:border-box;background:#0c1016;border:1px solid #2c3746;
+  color:#e2e8f0;border-radius:7px;padding:8px 10px;font:inherit}
+input:focus{outline:none;border-color:#4c9fe6}
+button{width:100%;margin-top:14px;background:#4c9fe6;border:0;color:#08111b;
+  font:inherit;font-weight:600;border-radius:7px;padding:9px;cursor:pointer}
+button:hover{background:#62adec}
+.err{color:#e0605b;font-size:11.5px;margin-top:10px;min-height:14px}
 </style>
 </head>
 <body>
 <form id="f">
-  <h1>fanout</h1>
+  <h1><svg viewBox="0 0 24 24"><circle cx="5" cy="12" r="2"/><path d="M7 12h4"/><path d="M11 12 19 5"/><path d="M11 12h8"/><path d="m11 12 8 7"/></svg>fanout</h1>
   <label for="pw">访问口令</label>
   <input type="password" id="pw" autofocus autocomplete="current-password">
   <button type="submit">进入</button>

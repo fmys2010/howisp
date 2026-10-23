@@ -19,6 +19,7 @@ type Manager struct {
 	workDir  string
 	maxSlots int
 	jobs     JobStore
+	ipinfo   ipinfoStore // 出口 IP 的质量与位置（见 ipinfo.go）
 }
 
 func NewManager(maxSlots int, workDir string) *Manager {

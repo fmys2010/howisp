@@ -18,6 +18,8 @@ type Exit struct {
 	// SOCKS5 凭据：界面要能看、能复制、能改
 	SocksUser string `json:"socks_user"`
 	SocksPass string `json:"socks_pass"`
+	// IPInfo 是出口 IP 的位置与质量，还没查到时为空
+	IPInfo *IPInfo `json:"ipinfo,omitempty"`
 }
 
 // ExitsView 是主界面需要的全部数据。
@@ -25,11 +27,13 @@ type ExitsView struct {
 	Exits []Exit `json:"exits"`
 	// PublicIP 是母机公网 IPv4，前端用它拼 SOCKS5 地址
 	PublicIP string `json:"public_ip"`
+	// HostInfo 是母机自己的位置与质量，地图上画连线的起点
+	HostInfo *IPInfo `json:"host_info,omitempty"`
 }
 
 // ExitsOf 汇总当前所有出口。
 func (m *Manager) ExitsOf() ExitsView {
-	view := ExitsView{Exits: []Exit{}, PublicIP: hostPublicIP()}
+	view := ExitsView{Exits: []Exit{}, PublicIP: hostPublicIP(), HostInfo: m.HostIPInfo()}
 	for _, v := range m.Views() {
 		provider, country := "vpngate", nodeLabel(v.Node)
 		if v.Node.isPsiphon() {
@@ -48,6 +52,7 @@ func (m *Manager) ExitsOf() ExitsView {
 			Since:     v.Since,
 			SocksUser: v.Cred.User,
 			SocksPass: v.Cred.Pass,
+			IPInfo:    m.IPInfoOf(v.ExitIP),
 		})
 	}
 	return view
