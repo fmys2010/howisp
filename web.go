@@ -1116,6 +1116,8 @@ function httpProxyURL(host, port, user, pass){
 // 公网 IPv4，流量再从出口 IP 出去。出口 IP 是"出去以后"的地址，不能当连接地址。
 // public_ip 是后端探测到的母机公网地址；探测不到才退回访问面板用的主机名。
 function credHost(e){
+  // 管理界面只监听本机时，是经 SSH 隧道在本机看的，公网地址对他没用
+  if(view.local_only) return '127.0.0.1';
   return view.public_ip || location.hostname || e.host;
 }
 

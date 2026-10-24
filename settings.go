@@ -123,6 +123,12 @@ func normalizeListenAddr(addr string) (string, error) {
 	return "", fmt.Errorf("监听地址必须是合法 IP，或留空表示所有网卡")
 }
 
+// isLoopbackListen 判断监听地址是不是回环地址（127.0.0.0/8 或 ::1）。空表示所有网卡，不算。
+func isLoopbackListen(addr string) bool {
+	ip := net.ParseIP(strings.TrimSpace(addr))
+	return ip != nil && ip.IsLoopback()
+}
+
 // validatePort 校验端口范围。
 func validatePort(p int) error {
 	if p < 1 || p > 65535 {
