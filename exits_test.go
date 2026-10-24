@@ -69,3 +69,36 @@ func TestSaveStateConcurrentWithTunnelUpdates(t *testing.T) {
 	}
 	<-done
 }
+// 管理界面只监听回环地址时，面板里的代理链接要改用 127.0.0.1，前端靠 local_only 判断。
+func TestExitsLocalOnly(t *testing.T) {
+	cases := map[string]bool{
+		"": false, "0.0.0.0": false, "203.0.113.5": false,
+		"127.0.0.1": true, "127.0.0.2": true, "::1": true, "localhost": false,
+	}
+	for addr, want := range cases {
+		if got := isLoopbackListen(addr); got != want {
+			t.Errorf("isLoopbackListen(%q) = %v，应为 %v", addr, got, want)
+		}
+	}
+
+	webSettingsMu.Lock()
+	prev := webSettingsCur
+	webSettingsCur.ListenAddr = "127.0.0.1"
+	webSettingsMu.Unlock()
+	defer func() {
+		webSettingsMu.Lock()
+		webSettingsCur = prev
+		webSettingsMu.Unlock()
+	}()
+
+	m := NewManager(5, t.TempDir())
+	if !m.ExitsOf().LocalOnly {
+		t.Fatal("监听 127.0.0.1 时 local_only 应为 true")
+	}
+	webSettingsMu.Lock()
+	webSettingsCur.ListenAddr = ""
+	webSettingsMu.Unlock()
+	if m.ExitsOf().LocalOnly {
+		t.Fatal("监听所有网卡时 local_only 应为 false")
+	}
+}

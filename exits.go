@@ -27,13 +27,21 @@ type ExitsView struct {
 	Exits []Exit `json:"exits"`
 	// PublicIP 是母机公网 IPv4，前端用它拼 SOCKS5 地址
 	PublicIP string `json:"public_ip"`
+	// LocalOnly 表示管理界面只监听本机回环地址：此时用户是经 SSH 隧道等方式在本机访问，
+	// 面板里给出的代理链接应当用 127.0.0.1，而不是对他没意义的公网地址
+	LocalOnly bool `json:"local_only"`
 	// HostInfo 是母机自己的位置与质量，地图上画连线的起点
 	HostInfo *IPInfo `json:"host_info,omitempty"`
 }
 
 // ExitsOf 汇总当前所有出口。
 func (m *Manager) ExitsOf() ExitsView {
-	view := ExitsView{Exits: []Exit{}, PublicIP: hostPublicIP(), HostInfo: m.HostIPInfo()}
+	view := ExitsView{
+		Exits:     []Exit{},
+		PublicIP:  hostPublicIP(),
+		LocalOnly: isLoopbackListen(getWebSettings().ListenAddr),
+		HostInfo:  m.HostIPInfo(),
+	}
 	for _, v := range m.Views() {
 		provider, country := "vpngate", nodeLabel(v.Node)
 		switch {
